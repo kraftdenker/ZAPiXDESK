@@ -41,10 +41,13 @@ You can just collect this ID and DB and nodb files to decrypt in other machine.
 FIRST OF ALL!
 - It is necessary to unblock BC`s DLL in windows. BouncyCastle.Cryptography.dll must be in the same directory of the ZAPiXWEB.ps1 file.
   Similar process as decribed for other DLL in https://simpledns.plus/kb/206-how-to-unblock-downloaded-plug-in-dll-file
+- It also necessary to enable unrestricted execution in powershell with the following command typed on PS console:
+  
+  `Set-ExecutionPolicy Unrestricted`
 - Open PowerShell on target computer (it will claim administrative rights).
 run script:
 
-`.\ZAPiXDESK.ps1`
+  `.\ZAPiXDESK.ps1`
 
 Have a nice 4N6!
 
