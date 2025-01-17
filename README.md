@@ -17,6 +17,7 @@ LICENSE GNU General Public License v3.0
 # Description: 
 A script that extracts DBKey and decrypt all SQLITE3 database files (including db and write-ahead-logfiles ). 
 At final a ZIP file containing all WhatsAppDesk local state decripted and a SHA512 is calculated.
+Some information also in: https://medium.com/@alberto.magno/whatsapp-desktop-and-web-live-forensics-4n6-233f640e9fb3
 
 Technique based on reverse-engineering-fu (yes! you do not need to use SQLITE3 SEE to decrypt) and some infos contained in following paper:
 Giyoon Kim, Uk Hur, Soojin Kang, Jongsung Kim,Analyzing the Web and UWP versions of WhatsApp for digital forensics,
