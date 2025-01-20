@@ -763,4 +763,4 @@ $checksumFileZip = Generate-SHA512Checksum -FilePath $zipTarget
 if ($checksumFileZip) {
     Write-Verbose "Checksum file (ZIP): $checksumFileZip"
 }
-Write-Output "HASH (SHA512): $checksumFileZip"
+Write-Output "HASH (SHA512): $checksumFileZip (hash also copied to clipboard)"
