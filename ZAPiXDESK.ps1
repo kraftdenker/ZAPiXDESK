@@ -46,7 +46,7 @@ function Get-AppLocalStatePath {
     $appPackage = Get-AppxPackage | Where-Object {$_.Name -like "*$AppName*"}
 
     if ($appPackage) {
-        # Verifica se é o WhatsApp para usar o PackageFamilyName
+        # Verify if does it use PackageFamilyName or not
         if ($appPackage.Name -like "*WhatsApp*") {
             $packageId = $appPackage.PackageFamilyName
         } else {
