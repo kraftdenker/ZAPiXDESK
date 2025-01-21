@@ -35,7 +35,7 @@ https://doi.org/10.1016/j.fsidi.2024.301861.
 
 This script uses Bouncy Castle (BC) for C# .NET (MIT License).
 https://www.bouncycastle.org/
-OBS: this version need target maschine on to access unique device id. Its not possible to decript without this ID.
+OBS: this version needs target machine to be on to access unique device id. Its not possible to decript without this ID.
 You can just collect this ID and DB and nodb files to decrypt in other machine.
 
 # Usage:
