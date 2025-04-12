@@ -1,3 +1,12 @@
+param (
+    [Parameter(Mandatory = $false)]
+    [string]$WhatsAppPath,
+    [Parameter(Mandatory = $false)]
+    [switch]$Offline,
+    [Parameter(Mandatory = $false)]
+    [string]$ID
+)
+
 Clear-Host
 Write-Output "______  ___  ______ ___   _______ _____ _____ _   __
 |___  / / _ \ | ___ (_) \ / /  _  \  ___/  ___| | / /
@@ -25,12 +34,64 @@ Write-Output "______  ___  ______ ___   _______ _____ _____ _   __
 # https://doi.org/10.1016/j.fsidi.2024.301861.
 # (https://www.sciencedirect.com/science/article/pii/S2666281724001884)
 
+# Updates: 10 April 2025 - Corey Forman @digitalsleuth
+# The following signatures were observed before each of the values during analysis of multiple
+# nondb_settings dat files
+# dpapi_blob signature: 02010430. If the next byte is not 81 or 82, Then skip that and 2 more bytes and read the right nibble of the 4th byte to 
+# determine the number of bytes to read next for the size of the dpapi_blob.
+# If it is 81 or 82, the right nibble tells you how many bytes come after it, after those it's a 0x04, then the size byte for the num of bytes in the
+# dpapi_blob size. So if it's 81, then 1 byte follows (skip it), then 04 after that (skip it) then the third byte is the byte count for size.
+# If it's 82, then 2 bytes follow (skip them) then 04, then the fourth byte is the byte count for size.
+# Could use the 01 00 00 00 signature, however that could appear more frequently than expected.
+
+# The byte after the dpapi_blob signature (rather, the right nibble) indicates how many bytes are in the size of the entire block from 0x04 until
+# the entry: 0x30 0B 06 09 60 86 48 01 65 03 04 01 2D 04
+# For now, I'm just using the last 4 bytes for the wrapped_key signature:
+# wrapped_key signature: 04012D04
+# The next byte is typically 28 (40)
+
+# The next 30 bytes for the nondb_settings16.dat seem to be: 30 6D 06 09 2A 86 48 86 F7 0D 01 07 01 30 1E 06 09 60 86 48 01 65 03 04 01 2E 30 11 04 0C
+# And for the nondb_settings18.dat the next 32 seem to be:   30 82 01 EF 06 09 2A 86 48 86 F7 0D 01 07 01 30 1E 06 09 60 86 48 01 65 03 04 01 2E 30 11 04 0C
+# The 0C is the size for the nonce, but since both values have 2E 30 11 04 before the size, I'm using that as the signature.
+# nonce signature: 2E301104
+
+# Immediately after the nonce should be 02 01 10 80. If the following byte is 81 or 82, we read the right
+# nibble to determine how many bytes following this next byte to read for the size.
+# Otherwise, the next byte is the size of the cipher_text AND the gcm
+# This seems to go all the way to the end of the file, with the exception of the last 5 bytes.
+# cipher_text: 02011080
+# gcm is last 16 bytes of cipher_text
+# The last 5 bytes of each file are different for each file, except that the last byte is always 01.
+
 $global:currentDirectory = Get-Location
 $global:metaDataFileName = "ZAPiXDESK.mtd.txt"
 $global:reverseDate = Get-Date -Format "yyyyMMddHHmmss"
 $global:targetOutput="$currentDirectory\ZAPiXDESK_$reverseDate"
 $global:userKey = [byte[]]::new(32)
 $global:whatsappDll_passphrase = "5303b14c0984e9b13fe75770cd25aaf7"
+
+function Convert-HexStringToByteArray {
+    param (
+        [string]$hexString
+    )
+
+    # Remove any spaces or dashes from the hex string
+    $hexString = $hexString -replace '[-\s]', ''
+
+    # Ensure the hex string length is even
+    if ($hexString.Length % 2 -ne 0) {
+        throw "The hex string must have an even length."
+    }
+
+    # Convert the hex string to a byte array
+    $byteArray = @()
+    for ($i = 0; $i -lt $hexString.Length; $i += 2) {
+        $byteValue = [Convert]::ToByte($hexString.Substring($i, 2), 16)
+        $byteArray += $byteValue
+    }
+
+    return ,$byteArray
+}
 $global:whatsappDll_passphrase_bc = (Convert-HexStringToByteArray $whatsappDll_passphrase)
 
 function Get-AppLocalStatePath {
@@ -63,8 +124,6 @@ function Get-AppLocalStatePath {
     }
 }
 
-
-
 # Function to copy the contents of a directory to a destination,
 # creating or clearing the destination if it exists, waiting for completion,
 # and handling individual file copy errors.
@@ -94,7 +153,7 @@ function Copy-Directory {
 
         # Copy the contents of the source directory to the destination
         Get-ChildItem -Path $Source -Force -Recurse | ForEach-Object {
-            $targetPath = Join-Path -Path $Destination -ChildPath ($_.FullName.Substring($Source.Length + 1))
+            $targetPath = Join-Path -Path $Destination -ChildPath ($_.FullName.Substring($Source.Length))
             if ($_.PSIsContainer) {
                 Write-Verbose "Creating directory: $targetPath"
                 New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
@@ -191,30 +250,6 @@ function Read-Bytes {
     $fileStream.Close()
     return $buffer
 }
-
-function Convert-HexStringToByteArray {
-    param (
-        [string]$hexString
-    )
-
-    # Remove any spaces or dashes from the hex string
-    $hexString = $hexString -replace '[-\s]', ''
-
-    # Ensure the hex string length is even
-    if ($hexString.Length % 2 -ne 0) {
-        throw "The hex string must have an even length."
-    }
-
-    # Convert the hex string to a byte array
-    $byteArray = @()
-    for ($i = 0; $i -lt $hexString.Length; $i += 2) {
-        $byteValue = [Convert]::ToByte($hexString.Substring($i, 2), 16)
-        $byteArray += $byteValue
-    }
-
-    return ,$byteArray
-}
-
 
 # Função para desembrulhar a chave AES usando Bouncy Castle
 function Unwrap-AesKeyBC {
@@ -332,31 +367,24 @@ function Get-Key {
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
         [boolean]$HasPadding
     )
-    # The following signatures were observed before each of the values during analysis of multiple
-    # nondb_settings dat files
-    # dpapi_blob signature: 02010430. Then skip 3 bytes, and read the right nibble of the 4th byte to 
-    # determine the number of bytes to read next for the size of the dpapi_blob.
-    # Could use the 01 00 00 00 signature, however that could appear more frequently than expected.
-
-    # wrapped_key signature: 04012D04
-    # nonce signature: 2E301104
-    # cipher_text: 02011080 - If the next byte is 0x81 or 0x82 (could be more values), then read the right
-    # nibble to determine how many bytes following this next byte to read for the size.
-    # gcm is last 16 bytes of cipher_text
-    
+   
     Write-Verbose "--- Extracting key from $FilePath ---"
     $byteArray = [System.IO.File]::ReadAllBytes($FilePath)
-    $dpapi_blob_size, $dpapi_blob, $dpapi_hex = Find-Signature $byteArray ([byte[]](0x02,0x01,0x04,0x30)) 3 $false
+    $dpapi_blob_size, $dpapi_blob, $dpapi_hex = Find-Signature $byteArray ([byte[]](0x02,0x01,0x04,0x30)) 0 $false
     Write-Verbose "dpapi_blob_size: $dpapi_blob_size"
     Write-Verbose "dpapi_blob: $dpapi_hex"
+    "--- $FilePath ---" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    "dpapi_blob: $dpapi_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
 
     $wrapped_key_size, $wrapped_key, $wrapped_key_hex = Find-Signature $byteArray ([byte[]](0x04,0x01,0x2D,0x04)) 0 $false
     Write-Verbose "wrapped_key_size: $wrapped_key_size"
     Write-Verbose "wrapped_key: $wrapped_key_hex"
+    "wrapped_key: $wrapped_key_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
 
     $nonce_size, $nonce, $nonce_hex = Find-Signature $byteArray ([byte[]](0x2E,0x30,0x11,0x04)) 0 $false
     Write-Verbose "nonce_size: $nonce_size"
     Write-Verbose "nonce: $nonce_hex"
+    "nonce: $nonce_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
 
     $cipher_text_and_gcm_size, $cipher_text_and_gcm, $cipher_text_and_gcm_hex = Find-Signature $byteArray ([byte[]](0x02,0x01,0x10,0x80)) 0 $false
     $cipher_text_size = $cipher_text_and_gcm_size - 16
@@ -364,12 +392,14 @@ function Get-Key {
     $cipher_text_hex = $cipher_text_and_gcm_hex.Substring(0, ($cipher_text_size * 2))
     Write-Verbose "cipher_text_size: $cipher_text_size"
     Write-Verbose "cipher_text: $cipher_text_hex"
+    "cipher_text: $cipher_text_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
 
     $gcm_tag = $cipher_text_and_gcm[($cipher_text_and_gcm_size - 16)..$cipher_text_and_gcm_size]
     $gcm_tag_hex = [BitConverter]::ToString($gcm_tag).Replace('-', '')
     Write-Verbose "gcm_tag: $gcm_tag_hex"
-    
+    "gcm_tag: $gcm_tag_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
     Write-Verbose "--- End key extraction from $FilePath ---"
+    "--- End $FilePath ---" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
     if ($PSBoundParameters.ContainsKey('UserKey'))
     {
         return Decrypt-NS $dpapi_blob $wrapped_key $nonce $cipher_text $gcm_tag $UserKey $HasPadding
@@ -617,8 +647,27 @@ function Find-Signature {
             }
 
             $sizeIndicatorByte = $ByteArray[$sizeIndicatorIndex]
-            
-            if ($sizeIndicatorByte -in @(0x81, 0x82)){
+            if ($Signature -join ',' -eq '2,1,4,48' -and $sizeIndicatorByte -in @(0x81, 0x82)) {
+                $firstRightNibble = $sizeIndicatorByte -band 0x0F
+
+                if ($firstRightNibble -eq 1) {
+                    $sizeIndicatorIndex += 3 # Skips the single byte and the 0x04 after
+                } elseif ($firstRightNibble -eq 2) {
+                    $sizeIndicatorIndex += 4 # Skips the two bytes and the 0x04 after
+                } else {
+                    Write-Verbose "Unexpected nibble value after special signature."
+                    return
+                }
+
+                if ($sizeIndicatorIndex -ge $ByteArray.Length) {
+                    Write-Verbose "Reached end of array before actual size indicator byte."
+                    return
+                }
+
+                $sizeIndicatorByte = $ByteArray[$sizeIndicatorIndex]
+                $UseNibble = $true
+            }
+            elseif (-not ($Signature -join ',' -eq '2,1,4,48') -and $sizeIndicatorByte -in @(0x81, 0x82)){
                 $UseNibble = $true
             }
             if ($UseNibble) {
@@ -630,7 +679,6 @@ function Find-Signature {
                     Write-Verbose "Not enough data to read size field."
                     return
                 }
-
                 $sizeBytes = $ByteArray[$sizeBytesStart..$sizeBytesEnd]
                 $sizeValue = 0
                 foreach ($b in $sizeBytes) {
@@ -668,27 +716,37 @@ function Find-Signature {
 function Start-ZapixDesk {
     param(
         [Parameter(Mandatory = $false)]
-        [string]$WhatsAppPath
+        [string]$WhatsAppPath,
+        [Parameter(Mandatory = $false)]
+        [switch]$Offline,
+        [Parameter(Mandatory = $false)]
+        [string]$ID
     )
     if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
     {
         $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
     }
+
     # Verify Administrator rights 
-    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
-    { 
-        try {
-            # Elevate to power user
-            $arguments = "& '" + $myInvocation.MyCommand.Definition + "'" 
-            Start-Process powershell -Verb runAs -ArgumentList $arguments 
-            Exit
-        }
-        catch {
-            Write-Verbose "Unable to elevate to Administrator. Exiting."
-            Exit
-        }
+#    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
+#    { 
+#        try {
+#            # Elevate to power user
+#            $arguments = "& '" + $myInvocation.MyCommand.Definition + "'" 
+#            Start-Process powershell -Verb runAs -ArgumentList $arguments 
+#            Exit
+#        }
+#        catch {
+#            Write-Output "Unable to elevate to Administrator. Exiting."
+#            Exit
+#        }
+#    }
+    try {
+        Set-ExecutionPolicy Unrestricted
     }
-    Set-ExecutionPolicy Unrestricted
+    catch {
+        Write-Output "Unable to set execution policy to Unrestricted."
+    }
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -698,7 +756,7 @@ public class ClipcWrapper {
 }
 "@
     Add-Type -Path "$PSScriptRoot\BouncyCastle.Cryptography.dll"
-    # Verify if DLL loaded successfuly 
+    # Verify if DLL loaded successfully 
     if ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.FullName -like "*BouncyCastle*" }) {
         Write-Verbose "BouncyCastle assembly present."
     } else {
@@ -710,30 +768,45 @@ public class ClipcWrapper {
     Write-Verbose $WhatsAppPath
     Write-Verbose "Copying $WhatsAppPath to $targetOutput"
     Copy-Directory -Source $WhatsAppPath -Destination $targetOutput
-    "ZAPiXDESK DATE:$reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-    $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
-    $mtd = [RETRIEVAL_METHOD]$ODUID.Method
-    "ODUID Extraction Method:$mtd"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-    Write-Output "Method: $($mtd)"
-    $WhatsAppAppUID = $ODUID.ID
-    $hexaWhatsAppAppUID = ConvertTo-HexString $WhatsAppAppUID
-    "ODUID:$hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName"
-    
+    "ZAPiXDESK DATE: $reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    enum RETRIEVAL_METHOD {
+        ODUID_DEFAULT = 0
+        ODUID_TPM_EK
+        ODUID_UEFI_VARIABLE_TPM
+        ODUID_UEFI_VARIABLE_RANDOMSEED
+        ODUID_UEFI_DEV_LOCK_UNLOCK
+        ODUID_XBOX_CONSOLE_ID
+        ODUID_REGISTRY_ENTRY
+    }
+    if (-not $PSBoundParameters.ContainsKey('Offline')){
+        $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
+        $mtd = [RETRIEVAL_METHOD]$ODUID.Method
+        "ODUID Extraction Method: $mtd"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Write-Output "Method: $($mtd)"
+        $WhatsAppAppUID = $ODUID.ID
+        $hexaWhatsAppAppUID = ConvertTo-HexString $WhatsAppAppUID
+        "ODUID: $hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Write-Output "ODUID: $hexaWhatsAppAppUID"
+    }
+    else {
+        $whatsAppAppUID = Convert-HexStringToByteArray $ID
+        $hexaWhatsAppAppUID = $ID
+        "ODUID: $hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Write-Output "ODUID: $hexaWhatsAppAppUID"
+     }
     $userKey = Get-Key -FilePath "$WhatsAppPath\nondb_settings16.dat" -HasPadding $true
     $hexaUserKey = ConvertTo-HexString $userKey 
     Write-Output "UserKey: $hexaUserKey"
     
-    $ns18Output = Get-Key -FilePath "$WhatsAppPath\nondb_settings16.dat" -HasPadding $true
+    $ns18Output = Get-Key -FilePath "$WhatsAppPath\nondb_settings18.dat" -HasPadding $true
     $tmp_dec_nondb_settings18 = Join-Path -Path $currentDirectory -ChildPath 'dec_nondb_settings18.dat'
     [System.IO.File]::WriteAllBytes($tmp_dec_nondb_settings18, $ns18Output)
-    Write-Verbose "NS18:$ns18Output"
+    Write-Verbose "NS18: $(ConvertTo-HexString($ns18Output))"
     
-    #$dbKey = Get-DbKey -UserKey $userKey $tmp_dec_nondb_settings18
     $dbKey = Get-Key -FilePath $tmp_dec_nondb_settings18 -UserKey $userKey -HasPadding $false
-    Write-Output "DBKey calculated."
     $hexaDBKey = ConvertTo-HexString $dbKey 
     Write-Output "DBKey: $hexaDBKey"
-    "DBKEY:$hexaDBKey"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    "DBKEY: $hexaDBKey"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
     Remove-Item $tmp_dec_nondb_settings18
 
     # Decrypt all-files
@@ -750,4 +823,23 @@ public class ClipcWrapper {
         Write-Verbose "Checksum file (ZIP): $checksumFileZip"
     }
     Write-Output "SHA512 Hash: $checksumFileZip (hash also copied to clipboard)"
+}
+
+if ($PSBoundParameters.ContainsKey('Offline'))
+{
+    if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
+    {
+        $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+    }
+    if (-not $PSBoundParameters.ContainsKey('ID')){
+        Write-Output "The parameter 'ID' is required when using this script in Offline mode"
+        exit
+    }
+    Start-ZapixDesk -WhatsAppPath $WhatsAppPath -Offline -ID $ID
+} else {
+    if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
+    {
+        $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+    }
+    Start-ZapixDesk -WhatsAppPath $WhatsAppPath
 }
