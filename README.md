@@ -16,7 +16,7 @@ LICENSE GNU General Public License v3.0
 
 # Description: 
 A script that extracts DBKey and decrypts all SQLITE3 database files (including db and write-ahead-logfiles ). 
-On completion a ZIP file containing all WhatsApp  decrypted LocalState db's and a SHA512 is calculated.
+On completion a ZIP file containing all WhatsApp decrypted LocalState db's and a MD5 is calculated.
 Some information also in: https://medium.com/@alberto.magno/whatsapp-desktop-and-web-live-forensics-4n6-233f640e9fb3
 
 Technique based on reverse-engineering-fu (yes! you do not need to use SQLite3 SEE to decrypt) and some info contained in following paper:
@@ -31,7 +31,7 @@ https://doi.org/10.1016/j.fsidi.2024.301861.
 - It generates the userKey to generate the dbKey for decrypting the files.
 - DbKey is used to decrypt DB and WAL files.
 - All decrypted files and the other content of LocalState are zipped.
-- SHA512 HASH file is generates for chain-of-custody purposes.
+- MD5 HASH file is generates for chain-of-custody purposes.
 
 This script uses Bouncy Castle (BC) for C# .NET (MIT License).
 https://www.bouncycastle.org/
