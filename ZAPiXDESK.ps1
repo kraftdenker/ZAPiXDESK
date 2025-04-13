@@ -4,37 +4,28 @@ param (
     [Parameter(Mandatory = $false)]
     [switch]$Offline,
     [Parameter(Mandatory = $false)]
-    [string]$ID
+    [string]$ID,
+    [Parameter(Mandatory = $false)]
+    [switch]$GetID
 )
 
-Clear-Host
-Write-Output "______  ___  ______ ___   _______ _____ _____ _   __
-|___  / / _ \ | ___ (_) \ / /  _  \  ___/  ___| | / /
-   / / / /_\ \| |_/ /_ \ V /| | | | |__ \ `--.| |/ / 
-  / /  |  _  ||  __/| |/   \| | | |  __| `--. \    \ 
-./ /___| | | || |   | / /^\ \ |/ /| |___/\__/ / |\  \
-\_____/\_| |_/\_|   |_\/   \/___/ \____/\____/\_| \_/
-                                       ZAPiXDESK         
-# Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
-# URL: https://github.com/kraftdenker/ZAPiXDESK"                                      
-
 # Windows WhatsApp Desktop
-# Script Name: SPIZAPIXWEB.js
-# Version: 1.0
-# Revised Date: 01/01/25
+# Version: 2.0
+# Revised Date: 04/12/25
+# Revised by: Corey Forman (digitalsleuth)
 
 # Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
 # URL: https://github.com/kraftdenker/ZAPiXDESK
 
-# Description: A script that extracts DBKey and decrypt all SQLITE3 database files (including db and write-ahead-logfiles ). At final a ZIP file containing all WhatsAppDesk localstate decripted.
+# Description: A script that extracts DBKey and decrypt all SQLite3 database files (including db and write-ahead-logfiles ). At final a ZIP file containing all WhatsAppDesk localstate decripted.
 
-# Technique based on reverse-engineering-fu (yes! you do not need to use SQLITE3 SEE to decrypt) and infos contained in following paper:
+# Technique based on reverse-engineering-fu (yes! you do not need to use SQLite3 SEE to decrypt) and infos contained in following paper:
 # Giyoon Kim, Uk Hur, Soojin Kang, Jongsung Kim,Analyzing the Web and UWP versions of WhatsApp for digital forensics,
 # Forensic Science International: Digital Investigation,Volume 52,2025,301861,ISSN 2666-2817,
 # https://doi.org/10.1016/j.fsidi.2024.301861.
 # (https://www.sciencedirect.com/science/article/pii/S2666281724001884)
 
-# Updates: 10 April 2025 - Corey Forman @digitalsleuth
+# Updates: 12 April 2025 - Corey Forman @digitalsleuth
 # The following signatures were observed before each of the values during analysis of multiple
 # nondb_settings dat files
 # dpapi_blob signature: 02010430. If the next byte is not 81 or 82, Then skip that and 2 more bytes and read the right nibble of the 4th byte to 
@@ -69,7 +60,7 @@ $global:reverseDate = Get-Date -Format "yyyyMMddHHmmss"
 $global:targetOutput="$currentDirectory\ZAPiXDESK_$reverseDate"
 $global:userKey = [byte[]]::new(32)
 $global:whatsappDll_passphrase = "5303b14c0984e9b13fe75770cd25aaf7"
-
+$global:ZDVersion = "2.0.0"
 function Convert-HexStringToByteArray {
     param (
         [string]$hexString
@@ -722,6 +713,18 @@ function Start-ZapixDesk {
         [Parameter(Mandatory = $false)]
         [string]$ID
     )
+    Clear-Host
+    Write-Output "
+______  ___  ______ ___   _______ _____ _____ _   __
+|___  / / _ \ | ___ (_) \ / /  _  \  ___/  ___| | / /
+   / / / /_\ \| |_/ /_ \ V /| | | | |__ \ ---.| |/ /
+  / /  |  _  ||  __/| |/   \| | | |  __| ---. \    \
+./ /___| | | || |   | / /^\ \ |/ /| |___/\__/ / |\  \
+\_____/\_| |_/\_|   |_\/   \/___/ \____/\____/\_| \_/
+                                       ZAPiXDESK         
+# Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
+# URL: https://github.com/kraftdenker/ZAPiXDESK
+# Version: $ZDVersion"
     if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
     {
         $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
@@ -836,7 +839,12 @@ if ($PSBoundParameters.ContainsKey('Offline'))
         exit
     }
     Start-ZapixDesk -WhatsAppPath $WhatsAppPath -Offline -ID $ID
-} else {
+} elseif ($PSBoundParameters.ContainsKey('GetID')){
+    $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
+    $ODUID_HEX = ConvertTo-HexString $ODUID.ID
+    Write-Output "ODUID: $ODUID_HEX"
+}
+else {
     if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
     {
         $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
