@@ -41,7 +41,7 @@ You can just collect this ID and LocalState contents to decrypt on another machi
 
 # Usage:
 FIRST OF ALL!
-- It is necessary to unblock BouncyCastle.Cryptography.dll in Windows. BouncyCastle.Cryptography.dll must be in the same directory of the ZAPiXWEB.ps1 file.
+- It is necessary to unblock BouncyCastle.Cryptography.dll in Windows. BouncyCastle.Cryptography.dll must be in the same directory of the ZAPiXDESK.ps1 file.
 - It may also be necessary to enable set the execution policy to Unrestricted or Bypass in PowerShell to execute the script. This can be done with the following command in PS console:
   
   `Set-ExecutionPolicy Unrestricted` or `Set-ExecutionPolicy Bypass`
