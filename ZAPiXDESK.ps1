@@ -1,41 +1,88 @@
-clear
-Write-Output "______  ___  ______ ___   _______ _____ _____ _   __
-|___  / / _ \ | ___ (_) \ / /  _  \  ___/  ___| | / /
-   / / / /_\ \| |_/ /_ \ V /| | | | |__ \ `--.| |/ / 
-  / /  |  _  ||  __/| |/   \| | | |  __| `--. \    \ 
-./ /___| | | || |   | / /^\ \ |/ /| |___/\__/ / |\  \
-\_____/\_| |_/\_|   |_\/   \/___/ \____/\____/\_| \_/
-                                       ZAPiXDESK         
-# Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
-# URL: https://github.com/kraftdenker/ZAPiXDESK"                                      
+param (
+    [Parameter(Mandatory = $false)]
+    [string]$WhatsAppPath,
+    [Parameter(Mandatory = $false)]
+    [switch]$Offline,
+    [Parameter(Mandatory = $false)]
+    [string]$ID,
+    [Parameter(Mandatory = $false)]
+    [switch]$GetID,
+    [Parameter(Mandatory = $false)]
+    [string]$OutputPath
+)
 
 # Windows WhatsApp Desktop
-# Script Name: SPIZAPIXWEB.js
-# Version: 1.0
-# Revised Date: 01/01/25
+# Version: 2.0
+# Revised Date: 04/12/25
+# Revised by: Corey Forman (digitalsleuth)
 
 # Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
 # URL: https://github.com/kraftdenker/ZAPiXDESK
 
-# Description: A script that extracts DBKey and decrypt all SQLITE3 database files (including db and write-ahead-logfiles ). At final a ZIP file containing all WhatsAppDesk localstate decripted.
+# Description: A script that extracts DBKey and decrypt all SQLite3 database files (including db and write-ahead-logfiles ). At final a ZIP file containing all WhatsAppDesk localstate decripted.
 
-# Technique based on reverse-engineering-fu (yes! you do not need to use SQLITE3 SEE to decrypt) and infos contained in following paper:
+# Technique based on reverse-engineering-fu (yes! you do not need to use SQLite3 SEE to decrypt) and infos contained in following paper:
 # Giyoon Kim, Uk Hur, Soojin Kang, Jongsung Kim,Analyzing the Web and UWP versions of WhatsApp for digital forensics,
 # Forensic Science International: Digital Investigation,Volume 52,2025,301861,ISSN 2666-2817,
 # https://doi.org/10.1016/j.fsidi.2024.301861.
 # (https://www.sciencedirect.com/science/article/pii/S2666281724001884)
 
-# Verify Administrator rights 
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
-{ 
-	# Elevate to power user
-	$arguments = "& '" + $myInvocation.MyCommand.Definition + "'" 
-	Start-Process powershell -Verb runAs -ArgumentList $arguments 
-	Exit 
-}
-Set-ExecutionPolicy Unrestricted
+# Updates: 12 April 2025 - Corey Forman @digitalsleuth
+# The following signatures were observed before each of the values during analysis of multiple
+# nondb_settings dat files
+# dpapi_blob signature: 02010430. If the next byte is not 81 or 82, Then skip that and 2 more bytes and read the right nibble of the 4th byte to 
+# determine the number of bytes to read next for the size of the dpapi_blob.
+# If it is 81 or 82, the right nibble tells you how many bytes come after it, after those it's a 0x04, then the size byte for the num of bytes in the
+# dpapi_blob size. So if it's 81, then 1 byte follows (skip it), then 04 after that (skip it) then the third byte is the byte count for size.
+# If it's 82, then 2 bytes follow (skip them) then 04, then the fourth byte is the byte count for size.
+# Could use the 01 00 00 00 signature, however that could appear more frequently than expected.
 
-$currentDirectory = Get-Location
+# The byte after the dpapi_blob signature (rather, the right nibble) indicates how many bytes are in the size of the entire block from 0x04 until
+# the entry: 0x30 0B 06 09 60 86 48 01 65 03 04 01 2D 04
+# For now, I'm just using the last 4 bytes for the wrapped_key signature:
+# wrapped_key signature: 04012D04
+# The next byte is typically 28 (40)
+
+# The next 30 bytes for the nondb_settings16.dat seem to be: 30 6D 06 09 2A 86 48 86 F7 0D 01 07 01 30 1E 06 09 60 86 48 01 65 03 04 01 2E 30 11 04 0C
+# And for the nondb_settings18.dat the next 32 seem to be:   30 82 01 EF 06 09 2A 86 48 86 F7 0D 01 07 01 30 1E 06 09 60 86 48 01 65 03 04 01 2E 30 11 04 0C
+# The 0C is the size for the nonce, but since both values have 2E 30 11 04 before the size, I'm using that as the signature.
+# nonce signature: 2E301104
+
+# Immediately after the nonce should be 02 01 10 80. If the following byte is 81 or 82, we read the right
+# nibble to determine how many bytes following this next byte to read for the size.
+# Otherwise, the next byte is the size of the cipher_text AND the gcm
+# This seems to go all the way to the end of the file, with the exception of the last 5 bytes.
+# cipher_text: 02011080
+# gcm is last 16 bytes of cipher_text
+# The last 5 bytes of each file are different for each file, except that the last byte is always 01.
+
+$global:metaDataFileName = "ZAPiXDESK.mtd.txt"
+$global:whatsappDll_passphrase = "5303b14c0984e9b13fe75770cd25aaf7"
+$global:ZDVersion = "2.0.0"
+
+function Convert-HexStringToByteArray {
+    param (
+        [string]$hexString
+    )
+
+    # Remove any spaces or dashes from the hex string
+    $hexString = $hexString -replace '[-\s]', ''
+
+    # Ensure the hex string length is even
+    if ($hexString.Length % 2 -ne 0) {
+        throw "The hex string must have an even length."
+    }
+
+    # Convert the hex string to a byte array
+    $byteArray = @()
+    for ($i = 0; $i -lt $hexString.Length; $i += 2) {
+        $byteValue = [Convert]::ToByte($hexString.Substring($i, 2), 16)
+        $byteArray += $byteValue
+    }
+
+    return ,$byteArray
+}
+$global:whatsappDll_passphrase_bc = (Convert-HexStringToByteArray $whatsappDll_passphrase)
 
 function Get-AppLocalStatePath {
     param(
@@ -67,9 +114,6 @@ function Get-AppLocalStatePath {
     }
 }
 
-$zapLocalStatePath = Get-AppLocalStatePath -AppName "WhatsApp"
-Write-Verbose $zapLocalStatePath
-
 # Function to copy the contents of a directory to a destination,
 # creating or clearing the destination if it exists, waiting for completion,
 # and handling individual file copy errors.
@@ -99,7 +143,7 @@ function Copy-Directory {
 
         # Copy the contents of the source directory to the destination
         Get-ChildItem -Path $Source -Force -Recurse | ForEach-Object {
-            $targetPath = Join-Path -Path $Destination -ChildPath ($_.FullName.Substring($Source.Length + 1))
+            $targetPath = Join-Path -Path $Destination -ChildPath ($_.FullName.Substring($Source.Length))
             if ($_.PSIsContainer) {
                 Write-Verbose "Creating directory: $targetPath"
                 New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
@@ -107,7 +151,6 @@ function Copy-Directory {
                 try {
                     Write-Verbose "Copying file: $($_.FullName) to $targetPath"
                     Copy-Item -Path $_.FullName -Destination $targetPath -Force -ErrorAction Stop # Stop on error for each file
-                    #Write-Verbose "Copied: $($_.FullName)" # Visual feedback
                 }
                 catch {
                     Write-Warning "Failed to copy '$($_.FullName)': $($_.Exception.Message)"
@@ -121,38 +164,7 @@ function Copy-Directory {
         Write-Error "Error during copy operation: $($_.Exception.Message)"
     }
 }
-# Global UserKey
-$userKey = [byte[]]::new(32)
-# ZAPiXDESK Metadata file
-$metaDataFileName = "ZAPiXDESK.mtd.txt"
 
-# Copies zap directory (creates/clears the destination and ignores errors)
-$reverseDate = Get-Date -Format "yyyyMMddHHmmss"
-$targetOutput="$currentDirectory\ZAPiXDESK_$reverseDate"
-Copy-Directory -Source $zapLocalStatePath -Destination $targetOutput
-
-"ZAPiXDESK DATE:$reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-
-# enum RETRIEVAL_METHOD used to getOfflineDeviceUniqueID (live)
-enum RETRIEVAL_METHOD {
-    ODUID_DEFAULT = 0
-    ODUID_TPM_EK
-    ODUID_UEFI_VARIABLE_TPM
-    ODUID_UEFI_VARIABLE_RANDOMSEED
-    ODUID_UEFI_DEV_LOCK_UNLOCK
-    ODUID_XBOX_CONSOLE_ID
-    ODUID_REGISTRY_ENTRY
-}
-
-# Import function GetOfflineDeviceUniqueID (ODUID)
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class ClipcWrapper {
-    [DllImport("clipc.dll")]
-    public static extern int GetOfflineDeviceUniqueID(uint cbSalt, byte[] pbSalt, out uint oMethod, ref uint pcbSystemId, byte[] rgbSystemId, uint unk1, uint unk2);
-}
-"@
 
 function ConvertTo-HexString {
     param(
@@ -172,7 +184,16 @@ function Get-OfflineDeviceUniqueID {
     param(
         [string]$Salt
     )
-
+    # enum RETRIEVAL_METHOD used to getOfflineDeviceUniqueID (live)
+    enum RETRIEVAL_METHOD {
+        ODUID_DEFAULT = 0
+        ODUID_TPM_EK
+        ODUID_UEFI_VARIABLE_TPM
+        ODUID_UEFI_VARIABLE_RANDOMSEED
+        ODUID_UEFI_DEV_LOCK_UNLOCK
+        ODUID_XBOX_CONSOLE_ID
+        ODUID_REGISTRY_ENTRY
+    }
     $rm = [RETRIEVAL_METHOD]::ODUID_DEFAULT
     $cbSalt = 0
     $pbSalt = [byte[]]::new(0)
@@ -198,32 +219,10 @@ function Get-OfflineDeviceUniqueID {
         throw [System.ComponentModel.Win32Exception]::new($res)
     }
 
-    Write-Verbose "Got device-unique ID"
-    #Write-Verbose "ID: $($rgbSystemId[2] -join '')" 
-    return @{Method = $rm; ID = $rgbSystemId}
-}
-# OFFLINEDEVICEUNIQUEID Stuff
-$result = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
-$mtd = [RETRIEVAL_METHOD]$result.Method
-"ODUID Extraction Method:$mtd"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-Write-Host "Method: $($mtd)"
-#Write-Verbose "ID: $($result.ID -join '')"
-$WhatsAppAppUID = $result.ID #ConvertTo-HexString($result.ID)
-$hexaWhatsAppAppUID = ConvertTo-HexString $WhatsAppAppUID 
-"ODUID:$hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName" 
-# WhatsApp.DLL Passphrase (in WhatsApp.dll)
-Set-Variable -Name "whatsappDll_passphrase" -Value "5303b14c0984e9b13fe75770cd25aaf7" -Option Constant
-
-Add-Type -AssemblyName System.Security
-
-#Load BoucyCastle for cryptography operations
-$bouncecastleDllPath = "$PSScriptRoot\BouncyCastle.Cryptography.dll"
-Add-Type -Path $bouncecastleDllPath
-# VErify if did DLL loaded successfuly 
-if ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.FullName -like "*BouncyCastle*" }) {
-    Write-Verbose "BouncyCastle assembly present."
-} else {
-    Write-Verbose "Erro: BouncyCastle assembly not loaded."
+    Write-Verbose "Got Offline Device Unique ID"
+    $devID = ConvertTo-HexString $rgbSystemId
+    Write-Verbose "ID: $devID"
+    return @{Method = [RETRIEVAL_METHOD]$rm; ID = $rgbSystemId}
 }
 
 function Read-Bytes {
@@ -241,49 +240,7 @@ function Read-Bytes {
     return $buffer
 }
 
-function Convert-HexStringToByteArray {
-    param (
-        [string]$hexString
-    )
-
-    # Remove any spaces or dashes from the hex string
-    $hexString = $hexString -replace '[-\s]', ''
-
-    # Ensure the hex string length is even
-    if ($hexString.Length % 2 -ne 0) {
-        throw "The hex string must have an even length."
-    }
-
-    # Convert the hex string to a byte array
-    $byteArray = @()
-    for ($i = 0; $i -lt $hexString.Length; $i += 2) {
-        $byteValue = [Convert]::ToByte($hexString.Substring($i, 2), 16)
-        $byteArray += $byteValue
-    }
-
-    return ,$byteArray
-}
-function Convert-HexStringToByteArray {
-    param (
-        [string]$HexString
-    )
-
-    # Remove any non-hexadecimal characters (if necessary)
-    $HexString = $HexString -replace '[^0-9A-Fa-f]', ''
-
-    # Split the string into pairs of hexadecimal digits
-    $byteArray = @()
-    for ($i = 0; $i -lt $HexString.Length; $i += 2) {
-        $byte = $HexString.Substring($i, 2)
-        $byteArray += [Convert]::ToByte($byte, 16)
-    }
-
-    return $byteArray
-}
-
-
-
-# Função para desembrulhar a chave AES usando Bouncy Castle
+# Function to unwrap AES key using Bouncy Castle
 function Unwrap-AesKeyBC {
     param(
         [Parameter(Mandatory = $true)]
@@ -306,12 +263,12 @@ function Unwrap-AesKeyBC {
     }
     catch {
         Write-Error "Error unwrapping key (Bouncy Castle): $($_.Exception.Message)"
-        Write-Error $_.Exception | Format-List * # Mostra detalhes da exceção
+        Write-Error $_.Exception | Format-List *
         return $null
     }
 }
 
-function nsDecrypt{
+function Decrypt-NS{
     param(
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
         [System.Byte[]]$dpapi_blob,
@@ -332,7 +289,7 @@ function nsDecrypt{
 	$kek = [System.Security.Cryptography.ProtectedData]::Unprotect($dpapi_blob, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
     Write-Verbose "kek: $( [BitConverter]::ToString($kek).Replace('-', '') )"
     
-    # Decript wrappedKey
+    # Decrypt wrappedKey
 	# Unwrap AES key using AesKeyUnwrap
     $gcm_key = Unwrap-AesKeyBC -WrappedKey $wrapped_key -KEK $kek
 
@@ -340,7 +297,7 @@ function nsDecrypt{
 	Write-Verbose "gcm_key: $gcm_key_hex"
 	# Algorithm definition - AES256GCM 
     # Create the cipher 
-    $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new() 
+    $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new()
     $gcmBlockCipher = [Org.BouncyCastle.Crypto.Modes.GcmBlockCipher]::new($cipher) 
     $parameters = [Org.BouncyCastle.Crypto.Parameters.AeadParameters]::new([Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($gcm_key), 128, $nonce) 
     $cipher_text_tagged = $cipher_text + $gcmTag
@@ -390,135 +347,56 @@ function nsDecrypt{
     
 }
 
-function ns16 {
-    
-    $ns16_filePath = "$zapLocalStatePath\nondb_settings16.dat"
-    Write-Verbose "##################### NS16 #####################"
-
-    # Read dpapiBlob
-	$byteArray = [byte[]](Read-Bytes -filePath $ns16_filePath -offset 0x33 -length 2)
-	[Array]::Reverse($byteArray)
-    $dpapi_blob_size = [BitConverter]::ToInt16( $byteArray, 0)
+function Get-Key {
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [string]$FilePath,
+        [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+        [byte[]]$UserKey,
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [boolean]$HasPadding
+    )
+   
+    Write-Verbose "--- Extracting key from $FilePath ---"
+    $byteArray = [System.IO.File]::ReadAllBytes($FilePath)
+    $dpapi_blob_size, $dpapi_blob, $dpapi_hex = Find-Signature $byteArray ([byte[]](0x02,0x01,0x04,0x30)) 0 $false
     Write-Verbose "dpapi_blob_size: $dpapi_blob_size"
-    
-    $dpapi_blob = Read-Bytes -filePath $ns16_filePath -offset 0x35 -length $dpapi_blob_size
-    Write-Verbose "dpapi_blob: $( [BitConverter]::ToString($dpapi_blob).Replace('-', '') )"
+    Write-Verbose "dpapi_blob: $dpapi_hex"
+    "--- $FilePath ---" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    "dpapi_blob: $dpapi_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
 
-    # Read wrappedKey
-    $wrapped_key_size = (Read-Bytes -filePath $ns16_filePath -offset 0x177 -length 1)[0]
+    $wrapped_key_size, $wrapped_key, $wrapped_key_hex = Find-Signature $byteArray ([byte[]](0x04,0x01,0x2D,0x04)) 0 $false
     Write-Verbose "wrapped_key_size: $wrapped_key_size"
-    
-    $wrapped_key = Read-Bytes -filePath $ns16_filePath -offset 0x178 -length $wrapped_key_size
-    Write-Verbose "wrapped_key: $( [BitConverter]::ToString($wrapped_key).Replace('-', '') )"
+    Write-Verbose "wrapped_key: $wrapped_key_hex"
+    "wrapped_key: $wrapped_key_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
 
-    # Read nonce
-    $nonce_size = (Read-Bytes -filePath $ns16_filePath -offset 0x1bd -length 1)[0]
+    $nonce_size, $nonce, $nonce_hex = Find-Signature $byteArray ([byte[]](0x2E,0x30,0x11,0x04)) 0 $false
     Write-Verbose "nonce_size: $nonce_size"
-    
-    $nonce = Read-Bytes -filePath $ns16_filePath -offset 0x1be -length $nonce_size
-    Write-Verbose "nonce: $( [BitConverter]::ToString($nonce).Replace('-', '') )"
-    
-    # Read cipherText
-    $cipher_text_size = (Read-Bytes -filePath $ns16_filePath -offset 0x1ce -length 1)[0] - 16
+    Write-Verbose "nonce: $nonce_hex"
+    "nonce: $nonce_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+
+    $cipher_text_and_gcm_size, $cipher_text_and_gcm, $cipher_text_and_gcm_hex = Find-Signature $byteArray ([byte[]](0x02,0x01,0x10,0x80)) 0 $false
+    $cipher_text_size = $cipher_text_and_gcm_size - 16
+    $cipher_text = $cipher_text_and_gcm[0..($cipher_text_size -1)]
+    $cipher_text_hex = $cipher_text_and_gcm_hex.Substring(0, ($cipher_text_size * 2))
     Write-Verbose "cipher_text_size: $cipher_text_size"
-    
-    $cipher_text = Read-Bytes -filePath $ns16_filePath -offset 0x1cf -length $cipher_text_size
-    Write-Verbose "cipher_text: $( [BitConverter]::ToString($cipher_text).Replace('-', '') )"
-    
-    # Read gcmTag
-    $gcmTag = Read-Bytes -filePath $ns16_filePath -offset (0x1cf + $cipher_text_size) -length 16
-    Write-Verbose "gcmTag: $( [BitConverter]::ToString($gcmTag).Replace('-', '') )"
-	
-    $whatsappDll_passphrase_bc = Convert-HexStringToByteArray $whatsappDll_passphrase
+    Write-Verbose "cipher_text: $cipher_text_hex"
+    "cipher_text: $cipher_text_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
 
-    return nsDecrypt $dpapi_blob $wrapped_key $nonce $cipher_text $gcmTag $whatsappDll_passphrase_bc $true
-
-}
-
-function ns18 {
-    Write-Verbose "##################### NS18 #####################"
-    $n18_filePath = "$zapLocalStatePath\nondb_settings18.dat"
-    
-    # Read dpapiBlob
-	
-	$byteArray = [byte[]](Read-Bytes -filePath $n18_filePath -offset 0x33 -length 2)
-	[Array]::Reverse($byteArray)
-    $dpapi_blob_size = [BitConverter]::ToInt16( $byteArray, 0)
-    Write-Verbose "dpapi_blob_size: $dpapi_blob_size"
-    
-    $dpapi_blob = Read-Bytes -filePath $n18_filePath -offset 0x35 -length $dpapi_blob_size
-    Write-Verbose "dpapi_blob: $( [BitConverter]::ToString($dpapi_blob).Replace('-', '') )"
-
-    # Read wrappedKey
-    $wrapped_key_size = (Read-Bytes -filePath $n18_filePath -offset 0x177 -length 1)[0]
-    Write-Verbose "wrapped_key_size: $wrapped_key_size"
-    
-    $wrapped_key = Read-Bytes -filePath $n18_filePath -offset 0x178 -length $wrapped_key_size
-    Write-Verbose "wrapped_key: $( [BitConverter]::ToString($wrapped_key).Replace('-', '') )"
-
-    # Read nonce
-    $nonce_size = (Read-Bytes -filePath $n18_filePath -offset 0x1bf -length 1)[0]
-    Write-Verbose "nonce_size: $nonce_size"
-    
-    $nonce = Read-Bytes -filePath $n18_filePath -offset 0x1c0 -length $nonce_size
-    Write-Verbose "nonce: $( [BitConverter]::ToString($nonce).Replace('-', '') )"
-    
-    # Read cipherText
-	$byteArray = [byte[]](Read-Bytes -filePath $n18_filePath -offset 0x1d1 -length 2)
-	[Array]::Reverse($byteArray)
-    $cipher_text_size =  [BitConverter]::ToInt16( $byteArray, 0) - 16
-    Write-Verbose "cipher_text_size: $cipher_text_size"
-    
-    $cipher_text = Read-Bytes -filePath $n18_filePath -offset 0x1d3 -length $cipher_text_size
-    Write-Verbose "cipher_text: $( [BitConverter]::ToString($cipher_text).Replace('-', '') )"
-    
-    # Read gcmTag
-    $gcmTag = Read-Bytes -filePath $n18_filePath -offset (0x1d3 + $cipher_text_size) -length 16
-    Write-Verbose "gcmTag: $( [BitConverter]::ToString($gcmTag).Replace('-', '') )"
-
-    $whatsappDll_passphrase_bc = Convert-HexStringToByteArray $whatsappDll_passphrase
-    return nsDecrypt $dpapi_blob $wrapped_key $nonce $cipher_text $gcmTag $whatsappDll_passphrase_bc $true
-}
-
-function decNS18 {
-	param ([byte[]]$userKey, [string]$n18_filePath)
-    Write-Verbose "##################### DECNS18 #####################"
-    
-    # Read dpapiBlob
-	$byteArray = [byte[]](Read-Bytes -filePath $n18_filePath -offset 0x2B -length 2)
-	[Array]::Reverse($byteArray)
-    $dpapi_blob_size = [BitConverter]::ToInt16( $byteArray, 0)
-    Write-Verbose "dpapi_blob_size: $dpapi_blob_size"
-    
-    $dpapi_blob = (Read-Bytes -filePath $n18_filePath -offset 0x2D -length $dpapi_blob_size)
-    Write-Verbose "dpapi_blob: $( [BitConverter]::ToString($dpapi_blob).Replace('-', '') )"
-
-    # Read wrappedKey
-    $wrapped_key_size = (Read-Bytes -filePath $n18_filePath -offset 0x16f -length 1)[0]
-    Write-Verbose "wrapped_key_size: $wrapped_key_size"
-    
-    $wrapped_key = Read-Bytes -filePath $n18_filePath -offset 0x170 -length $wrapped_key_size
-    Write-Verbose "wrapped_key: $( [BitConverter]::ToString($wrapped_key).Replace('-', '') )"
-
-    # Read nonce
-    $nonce_size = (Read-Bytes -filePath $n18_filePath -offset 0x1b5 -length 1)[0]
-    Write-Verbose "nonce_size: $nonce_size"
-    
-    $nonce = Read-Bytes -filePath $n18_filePath -offset 0x1b6 -length $nonce_size
-    Write-Verbose "nonce: $( [BitConverter]::ToString($nonce).Replace('-', '') )"
-    
-    # Read cipherText
-    $cipher_text_size =  (Read-Bytes -filePath $n18_filePath -offset 0x1c6 -length $dpapi_blob_size)[0] -16
-    Write-Verbose "cipher_text_size: $cipher_text_size"
-    
-    $cipher_text = Read-Bytes -filePath $n18_filePath -offset 0x1c7 -length $cipher_text_size 
-    Write-Verbose "cipher_text: $( [BitConverter]::ToString($cipher_text).Replace('-', '') )"
-    
-    # Read gcmTag
-    $gcmTag = Read-Bytes -filePath $n18_filePath -offset (0x1c7 + $cipher_text_size) -length 16
-    Write-Verbose "gcmTag: $( [BitConverter]::ToString($gcmTag).Replace('-', '') )"
-
-    return nsDecrypt $dpapi_blob $wrapped_key $nonce $cipher_text $gcmTag $userKey $false
+    $gcm_tag = $cipher_text_and_gcm[($cipher_text_and_gcm_size - 16)..$cipher_text_and_gcm_size]
+    $gcm_tag_hex = [BitConverter]::ToString($gcm_tag).Replace('-', '')
+    Write-Verbose "gcm_tag: $gcm_tag_hex"
+    "gcm_tag: $gcm_tag_hex" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    Write-Verbose "--- End key extraction from $FilePath ---"
+    "--- End $FilePath ---" | Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    if ($PSBoundParameters.ContainsKey('UserKey'))
+    {
+        return Decrypt-NS $dpapi_blob $wrapped_key $nonce $cipher_text $gcm_tag $UserKey $HasPadding
+    }
+    else
+    {
+        return Decrypt-NS $dpapi_blob $wrapped_key $nonce $cipher_text $gcm_tag $whatsappDll_passphrase_bc $HasPadding
+    }
 }
 
 # Decrypt database page
@@ -530,19 +408,18 @@ function Decrypt-Page ($blockCipher, $keyParameter, $pageNumber, $pageData) {
     $cipherParameters = [Org.BouncyCastle.Crypto.Parameters.ParametersWithIV]::new($keyParameter, $IV)
 
     $null = $blockCipher.Init($true, $cipherParameters) 
-    # UJsing BufferedBlockCipher to be able to call ProcessBytes
+    # Using BufferedBlockCipher to be able to call ProcessBytes
     $bufferedCipher = [Org.BouncyCastle.Crypto.BufferedBlockCipher]::new($blockCipher)
     # Create buffer
     $decryptedBytes = [byte[]]::new($pageData.Length)
-    # DEcrypt block bytes
+    # Decrypt block bytes
     $null = $bufferedCipher.ProcessBytes($pageData, 0, $pageData.Length, $decryptedBytes, 0)
     $null = $bufferedCipher.DoFinal($decryptedBytes, $bufferedCipher.GetUpdateOutputSize($pageData.Length))
     return $decryptedBytes
 }
 
-# DEcrypt DB file
+# Decrypt DB file
 function Decrypt-DBFile ($dbKey, $inputFile, $outputFile) {
-    #$key = HexStringToByteArray $keyHex
     $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new() 
     $blockCipher = [Org.BouncyCastle.Crypto.Modes.OfbBlockCipher]::new($cipher, 128) 
     $keyParameter = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($dbKey)
@@ -577,7 +454,7 @@ function Decrypt-DBFile ($dbKey, $inputFile, $outputFile) {
 }
 
 function Decrypt-DBWALFile ($dbKey, $inputFile, $outputFile) {
-    #$key = HexStringToByteArray $keyHex
+
     $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new() 
     $blockCipher = [Org.BouncyCastle.Crypto.Modes.OfbBlockCipher]::new($cipher, 128) 
     $keyParameter = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($dbKey)
@@ -602,13 +479,13 @@ function Decrypt-DBWALFile ($dbKey, $inputFile, $outputFile) {
         [Array]::Copy($pageHeaderData,0,$pageIndex,0,4)
         [Array]::Reverse($pageIndex)
         $pageIndex = [System.BitConverter]::ToInt32($pageIndex, 0)
-        #Write-Output "pageIndex: $pageIndex"
+        Write-Verbose "pageIndex: $pageIndex"
         
         $IV = [byte[]]::new(16)
         [BitConverter]::GetBytes([int]$pageIndex).CopyTo($IV, 0)
         $pageData[-12..-1].CopyTo($IV, 4)
         $ivHex = [BitConverter]::ToString($IV).Replace("-", "")
-        #Write-Output "IV: $ivHex"
+        Write-Verbose "IV: $ivHex"
         
         $decryptedPage = Decrypt-Page $blockCipher $keyParameter $pageIndex $pageData
         $fileStream.Write($pageHeaderData, 0, $pageHeaderData.Length)
@@ -637,7 +514,7 @@ function Decrypt-AllFiles ($dbKey, $targetDirectory) {
         if ($file.Extension -eq ".db" -or $file.Extension -eq ".db-wal") { 
             $outputFile = [System.IO.Path]::ChangeExtension($file.FullName, ".dec" + $file.Extension) 
             if (-not (Test-Path $outputFile)) { 
-                try{
+                try {
                     if ($file.Extension -eq ".db") {
                         Write-Output "Decrypting DB: $file"
                         Decrypt-DBFile $dbKey $file.FullName $outputFile
@@ -647,8 +524,13 @@ function Decrypt-AllFiles ($dbKey, $targetDirectory) {
                                 Decrypt-DBWALFile $dbKey $file.FullName $outputFile
                             }
                     }
-                } catch{
-                    Write-Output "Error decrypting $file."
+                } catch {
+                    if ($_.Exception.Message -like "*Source array was not long enough*"){
+                        Write-Output "Error decrypting $file - File is $($file.Length) bytes."
+                    }
+                    else {
+                        Write-Output "Error decrypting $file - $($_.Exception.Message)"
+                    }
                 }
             } 
         } 
@@ -692,7 +574,7 @@ function Compress-Directory {
 }
 
 # Function to generate a SHA512 checksum of a file, save it to a text file, and copy it to the clipboard.
-function Generate-SHA512Checksum {
+function Get-SHA512Checksum {
     param(
         [Parameter(Mandatory = $true)]
         [string]$FilePath
@@ -716,7 +598,7 @@ function Generate-SHA512Checksum {
         }
 
         # Write the hash to the output file using UTF8 encoding
-        $hash.Hash | Out-File -FilePath $outputFilePath -Encoding UTF8
+        "$($hash.Hash) - $FilePath" | Out-File -FilePath $outputFilePath -Encoding UTF8
 
         # Copy the hash to the clipboard
         Set-Clipboard -Value $hash.Hash
@@ -730,37 +612,293 @@ function Generate-SHA512Checksum {
     }
 }
 
+function Get-MD5Checksum {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+
+    try {
+        # Check if the file exists
+        if (!(Test-Path -Path $FilePath -PathType Leaf)) {
+            throw "File '$FilePath' not found."
+        }
+
+        # Calculate the MD5
+        $hash = Get-FileHash -Path $FilePath -Algorithm MD5
+
+        # Create the output file path. Replace ".zip" with ".md5.txt" only if it ends with ".zip".
+        # If the file doesn't end with ".zip", simply append ".md5.txt".
+        if ($FilePath -like "*.zip") {
+            $outputFilePath = $FilePath -replace "\.zip$", ".md5.txt"
+        } else {
+            $outputFilePath = $FilePath + ".md5.txt"
+        }
+
+        # Write the hash to the output file using UTF8 encoding
+        "$($hash.Hash) - $FilePath" | Out-File -FilePath $outputFilePath -Encoding UTF8
+
+        # Copy the hash to the clipboard
+        Set-Clipboard -Value $hash.Hash
+
+        Write-Verbose "MD5 checksum for '$FilePath' written to '$outputFilePath' and copied to clipboard."
+        return $outputFilePath # Return the checksum file path
+    }
+    catch {
+        Write-Error "Error generating MD5 checksum for '$FilePath': $($_.Exception.Message)"
+        return $null # Return $null in case of error
+    }
+}
+
+function Find-Signature {
+    param (
+        [byte[]]$ByteArray,
+        [byte[]]$Signature,
+        [int]$BytesToSkip,
+        [bool]$UseNibble = $true
+    )
+
+    $sigLength = $Signature.Length
+    $index = 0
+    $maxIndex = $ByteArray.Length - $sigLength
+
+    while ($index -le $maxIndex) {
+        $match = $true
+        for ($i = 0; $i -lt $sigLength; $i++) {
+            if ($ByteArray[$index + $i] -ne $Signature[$i]) {
+                $match = $false
+                break
+            }
+        }
+
+        if ($match) {
+            $sizeIndicatorIndex = $index + $sigLength + $BytesToSkip
+            if ($sizeIndicatorIndex -ge $ByteArray.Length) {
+                Write-Verbose "Not enough data to read size indicator byte."
+                return
+            }
+
+            $sizeIndicatorByte = $ByteArray[$sizeIndicatorIndex]
+            if ($Signature -join ',' -eq '2,1,4,48' -and $sizeIndicatorByte -in @(0x81, 0x82)) {
+                $firstRightNibble = $sizeIndicatorByte -band 0x0F
+
+                if ($firstRightNibble -eq 1) {
+                    $sizeIndicatorIndex += 3 # Skips the single byte and the 0x04 after
+                } elseif ($firstRightNibble -eq 2) {
+                    $sizeIndicatorIndex += 4 # Skips the two bytes and the 0x04 after
+                } else {
+                    Write-Verbose "Unexpected nibble value after signature."
+                    return
+                }
+
+                if ($sizeIndicatorIndex -ge $ByteArray.Length) {
+                    Write-Verbose "Reached end of array before actual size indicator byte."
+                    return
+                }
+
+                $sizeIndicatorByte = $ByteArray[$sizeIndicatorIndex]
+                $UseNibble = $true
+            }
+            elseif (-not ($Signature -join ',' -eq '2,1,4,48') -and $sizeIndicatorByte -in @(0x81, 0x82)){
+                $UseNibble = $true
+            }
+            if ($UseNibble) {
+                # Use right nibble to get number of size bytes. This is founded in research only, experimental.
+                $rightNibble = $sizeIndicatorByte -band 0x0F
+                $sizeBytesStart = $sizeIndicatorIndex + 1
+                $sizeBytesEnd = $sizeBytesStart + $rightNibble - 1
+                if ($sizeBytesEnd -ge $ByteArray.Length) {
+                    Write-Verbose "Not enough data to read size field."
+                    return
+                }
+                $sizeBytes = $ByteArray[$sizeBytesStart..$sizeBytesEnd]
+                $sizeValue = 0
+                foreach ($b in $sizeBytes) {
+                    $sizeValue = ($sizeValue -shl 8) -bor $b
+                }
+
+                $dataStart = $sizeBytesEnd + 1
+            }
+            else {
+                $sizeValue = $sizeIndicatorByte
+                $dataStart = $sizeIndicatorIndex + 1
+                $rightNibble = $null
+                $sizeBytes = @()
+            }
+
+            $dataEnd = $dataStart + $sizeValue - 1
+            if ($dataEnd -ge $ByteArray.Length) {
+                Write-Verbose "Not enough data to read full blob."
+                return
+            }
+
+            $dataBlob = $ByteArray[$dataStart..$dataEnd]
+            $dataHex = ($dataBlob | ForEach-Object { $_.ToString("X2") }) -join ''
+            return $sizeValue, $dataBlob, $dataHex
+        }
+
+        $index++
+    }
+    Write-Verbose "Signature $Signature not found."
+}
 
 #########################################################################################################
 # Main 
-$userKey = ns16
-$hexaUserKey = ConvertTo-HexString $userKey 
-Write-Host "UserKey: $hexaUserKey"
 
-$ns18Output = ns18 
-$tmp_dec_nondb_settings18 = Join-Path -Path $currentDirectory -ChildPath 'dec_nondb_settings18.dat'
-[System.IO.File]::WriteAllBytes($tmp_dec_nondb_settings18, $ns18Output)
-Write-Verbose "Ns18:$ns18Output"
+function Start-ZapixDesk {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$WhatsAppPath,
+        [Parameter(Mandatory = $false)]
+        [switch]$Offline,
+        [Parameter(Mandatory = $false)]
+        [string]$ID,
+        [Parameter(Mandatory = $false)]
+        [string]$OutputPath
+    )
+    Clear-Host
+    Write-Output "
+______  ___  ______ ___   _______ _____ _____ _   __
+|___  / / _ \ | ___ (_) \ / /  _  \  ___/  ___| | / /
+   / / / /_\ \| |_/ /_ \ V /| | | | |__ \ ---.| |/ /
+  / /  |  _  ||  __/| |/   \| | | |  __| ---. \    \
+./ /___| | | || |   | / /^\ \ |/ /| |___/\__/ / |\  \
+\_____/\_| |_/\_|   |_\/   \/___/ \____/\____/\_| \_/
+                                       ZAPiXDESK         
+# Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
+# URL: https://github.com/kraftdenker/ZAPiXDESK
+# Version: $ZDVersion
+# Source Path: $($WhatsAppPath)
+# Output Path: $($OutputPath)"
 
-$dbKey = decNS18 -userKey $userKey $tmp_dec_nondb_settings18
-#Write-Output "DBKey: $dbKey"
-Write-Host "DBKey calculated."
-$hexaDBKey = ConvertTo-HexString $dbKey 
-Write-Output "DBKey: $hexaDBKey"
-"DBKEY:$hexaDBKey"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-Remove-Item $tmp_dec_nondb_settings18
-
-# Decript all-files
-Write-Output "Decripting databases..."
-Decrypt-AllFiles $dbKey $targetOutput
-
-# Compresses a directory to a zip file and deletes the source
-$zipTarget="$currentDirectory\ZAPiXDESK_$reverseDate.zip"
-Compress-Directory -Source $targetOutput -DestinationZipFile $zipTarget
-Write-Output "Compressed file (ZIP) generated: $zipTarget"
-# Generate integrity HASH
-$checksumFileZip = Generate-SHA512Checksum -FilePath $zipTarget
-if ($checksumFileZip) {
-    Write-Verbose "Checksum file (ZIP): $checksumFileZip"
+    # Verify Administrator rights 
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
+    { 
+        try {
+            $script_file = $MyInvocation.MyCommand.ScriptBlock.File
+            $script_path = Split-Path -Path $script_file -Parent
+            $argList = foreach ($key in $PSBoundParameters.Keys) {
+                $value = $PSBoundParameters[$key]
+                if ($value -is [switch]) {
+                    "-$key"
+                } elseif ($value -match '\s') {
+                    "-$key `"$value`""
+                } else {
+                    "-$key $value"
+                }
+            }
+            $arguments = $argList -join ' '
+            Start-Process powershell -Verb RunAs -WorkingDirectory $script_path -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$script_file`" $arguments"
+            Exit
+        }
+        catch {
+            Write-Output "Unable to elevate to Administrator. Exiting."
+            Exit
+        }
+    }
+    Add-Type -AssemblyName System.Security
+    Add-Type -AssemblyName System.Windows.Forms
+    try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class ClipcWrapper {
+    [DllImport("clipc.dll")]
+    public static extern int GetOfflineDeviceUniqueID(uint cbSalt, byte[] pbSalt, out uint oMethod, ref uint pcbSystemId, byte[] rgbSystemId, uint unk1, uint unk2);
 }
-Write-Output "HASH (SHA512): $checksumFileZip (hash also copied to clipboard)"
+"@ } catch {
+        Write-Warning "Unable to add the Clipcwrapper to utilize GetOfflineDeviceUniqueID - Unless ODUID can be extracted by other means, decryption may not be successful."
+    }
+    try {
+        Add-Type -Path "$PSScriptRoot\BouncyCastle.Cryptography.dll"
+        Write-Verbose "BouncyCastle Assembly loaded."
+    } catch {
+        Write-Error "Error: BouncyCastle assembly not loaded. Make sure the BouncyCastle.Cryptography.dll is located in $PSScriptRoot."
+        return
+    }
+    if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
+    {
+        $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+    }
+    Set-Variable -Name reverseDate -Value $(Get-Date -Format "yyyyMMddHHmmss") -Scope Global
+    Set-Variable -Name targetOutput -Value "$OutputPath\ZAPiXDESK_$reverseDate" -Scope Global
+    Write-Verbose $WhatsAppPath
+    Write-Verbose "Copying $WhatsAppPath to $targetOutput"
+    Copy-Directory -Source $WhatsAppPath -Destination $targetOutput
+    "ZAPiXDESK DATE: $reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    if (-not $PSBoundParameters.ContainsKey('Offline')){
+        $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
+        "ODUID Extraction Method: $($ODUID.Method)"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Write-Output "Method: $($ODUID.Method)"
+        $WhatsAppAppUID = $ODUID.ID
+        $hexaWhatsAppAppUID = ConvertTo-HexString $WhatsAppAppUID
+        "ODUID: $hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Write-Output "ODUID: $hexaWhatsAppAppUID"
+    }
+    else {
+        $whatsAppAppUID = Convert-HexStringToByteArray $ID
+        $hexaWhatsAppAppUID = $ID
+        "ODUID: $hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Write-Output "ODUID: $hexaWhatsAppAppUID"
+     }
+    $userKey = Get-Key -FilePath "$WhatsAppPath\nondb_settings16.dat" -HasPadding $true
+    $hexaUserKey = ConvertTo-HexString $userKey 
+    Write-Output "UserKey: $hexaUserKey"
+    
+    $ns18Output = Get-Key -FilePath "$WhatsAppPath\nondb_settings18.dat" -HasPadding $true
+    $tmp_dec_nondb_settings18 = Join-Path -Path $OutputDirectory -ChildPath 'dec_nondb_settings18.dat'
+    [System.IO.File]::WriteAllBytes($tmp_dec_nondb_settings18, $ns18Output)
+    Write-Verbose "NS18: $(ConvertTo-HexString($ns18Output))"
+    
+    $dbKey = Get-Key -FilePath $tmp_dec_nondb_settings18 -UserKey $userKey -HasPadding $false
+    $hexaDBKey = ConvertTo-HexString $dbKey 
+    Write-Output "DBKey: $hexaDBKey"
+    "DBKEY: $hexaDBKey"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+    Remove-Item $tmp_dec_nondb_settings18
+
+    # Decrypt all-files
+    Write-Output "Decrypting databases..."
+    Decrypt-AllFiles $dbKey $targetOutput
+
+    # Compresses a directory to a zip file and deletes the source
+    $zipTarget="$OutputDirectory\ZAPiXDESK_$reverseDate.zip"
+    Compress-Directory -Source $targetOutput -DestinationZipFile $zipTarget
+    Write-Output "Compressed file (ZIP) generated: $zipTarget"
+    # Generate integrity HASH - Changed to MD5 as computation time for higher algorithms for large files can be minutes instead of seconds.
+    $checksumFileZip = Get-MD5Checksum -FilePath $zipTarget
+    if ($checksumFileZip) {
+        Write-Verbose "Checksum file (ZIP): $checksumFileZip"
+    }
+    Write-Output "MD5 Hash: $checksumFileZip (hash also copied to clipboard)"
+    [Windows.Forms.MessageBox]::Show("WhatsApp acquisition and decryption completed. Results save in $zipTarget", "Acquisition Complete","Ok","Information") | Out-Null
+}
+
+if ($PSBoundParameters.ContainsKey('Offline'))
+{
+    if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
+    {
+        $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+    }
+    if (-not $PSBoundParameters.ContainsKey('ID')){
+        Write-Output "The parameter 'ID' is required when using this script in Offline mode"
+        exit
+    }
+    Start-ZapixDesk -WhatsAppPath $WhatsAppPath -Offline -ID $ID
+} elseif ($PSBoundParameters.ContainsKey('GetID')){
+    $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
+    $ODUID_HEX = ConvertTo-HexString $ODUID.ID
+    Write-Output "ODUID: $ODUID_HEX"
+}
+else {
+    if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
+    {
+        $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+    }
+    if (-not $PSBoundParameters.ContainsKey('OutputPath'))
+    {
+        Set-Variable -Name OutputDirectory -Value $(Get-Location) -Scope Global
+    } else {
+        Set-Variable -Name OutputDirectory -Value $OutputPath -Scope Global
+    }
+    Start-ZapixDesk -WhatsAppPath $WhatsAppPath -OutputPath $OutputDirectory
+}
