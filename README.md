@@ -42,13 +42,13 @@ You can just collect this ID and LocalState contents to decrypt on another machi
 # Usage:
 FIRST OF ALL!
 - It is necessary to unblock BouncyCastle.Cryptography.dll in Windows. BouncyCastle.Cryptography.dll must be in the same directory of the ZAPiXWEB.ps1 file.
-- It also necessary to enable set the execution policy to Unrestricted in PowerShell to execute the script. This can be done with the following command in PS console:
+- It may also be necessary to enable set the execution policy to Unrestricted or Bypass in PowerShell to execute the script. This can be done with the following command in PS console:
   
-  `Set-ExecutionPolicy Unrestricted`
+  `Set-ExecutionPolicy Unrestricted` or `Set-ExecutionPolicy Bypass`
 - Open PowerShell on target computer (it will attempt to claim administrative rights).
 run script:
 
-  `.\ZAPiXDESK.ps1`
+  `.\ZAPiXDESK.ps1` with selected arguments. If no arguments are supplied, defaults will be used.
 
 This script will take the following arguments:
 ```
@@ -56,6 +56,11 @@ This script will take the following arguments:
 ```
 - This should be the full file path to the location of the WhatsApp LocalState directory. If not provided, it will be derived from the running machine's
   installation of WhatsApp.
+
+```
+-OutputPath
+```
+- Allows you to select the OutputPath. If not chosen, it will output into the directory from where the script is executed.
 
 ```
 -Offline  

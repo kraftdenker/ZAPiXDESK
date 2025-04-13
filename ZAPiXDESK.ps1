@@ -6,7 +6,9 @@ param (
     [Parameter(Mandatory = $false)]
     [string]$ID,
     [Parameter(Mandatory = $false)]
-    [switch]$GetID
+    [switch]$GetID,
+    [Parameter(Mandatory = $false)]
+    [string]$OutputPath
 )
 
 # Windows WhatsApp Desktop
@@ -54,13 +56,10 @@ param (
 # gcm is last 16 bytes of cipher_text
 # The last 5 bytes of each file are different for each file, except that the last byte is always 01.
 
-$global:currentDirectory = Get-Location
 $global:metaDataFileName = "ZAPiXDESK.mtd.txt"
-$global:reverseDate = Get-Date -Format "yyyyMMddHHmmss"
-$global:targetOutput="$currentDirectory\ZAPiXDESK_$reverseDate"
-$global:userKey = [byte[]]::new(32)
 $global:whatsappDll_passphrase = "5303b14c0984e9b13fe75770cd25aaf7"
 $global:ZDVersion = "2.0.0"
+
 function Convert-HexStringToByteArray {
     param (
         [string]$hexString
@@ -152,7 +151,6 @@ function Copy-Directory {
                 try {
                     Write-Verbose "Copying file: $($_.FullName) to $targetPath"
                     Copy-Item -Path $_.FullName -Destination $targetPath -Force -ErrorAction Stop # Stop on error for each file
-                    #Write-Verbose "Copied: $($_.FullName)" # Visual feedback
                 }
                 catch {
                     Write-Warning "Failed to copy '$($_.FullName)': $($_.Exception.Message)"
@@ -224,7 +222,7 @@ function Get-OfflineDeviceUniqueID {
     Write-Verbose "Got Offline Device Unique ID"
     $devID = ConvertTo-HexString $rgbSystemId
     Write-Verbose "ID: $devID"
-    return @{Method = $rm; ID = $rgbSystemId}
+    return @{Method = [RETRIEVAL_METHOD]$rm; ID = $rgbSystemId}
 }
 
 function Read-Bytes {
@@ -242,7 +240,7 @@ function Read-Bytes {
     return $buffer
 }
 
-# Função para desembrulhar a chave AES usando Bouncy Castle
+# Function to unwrap AES key using Bouncy Castle
 function Unwrap-AesKeyBC {
     param(
         [Parameter(Mandatory = $true)]
@@ -265,7 +263,7 @@ function Unwrap-AesKeyBC {
     }
     catch {
         Write-Error "Error unwrapping key (Bouncy Castle): $($_.Exception.Message)"
-        Write-Error $_.Exception | Format-List * # Mostra detalhes da exceção
+        Write-Error $_.Exception | Format-List *
         return $null
     }
 }
@@ -516,7 +514,7 @@ function Decrypt-AllFiles ($dbKey, $targetDirectory) {
         if ($file.Extension -eq ".db" -or $file.Extension -eq ".db-wal") { 
             $outputFile = [System.IO.Path]::ChangeExtension($file.FullName, ".dec" + $file.Extension) 
             if (-not (Test-Path $outputFile)) { 
-                try{
+                try {
                     if ($file.Extension -eq ".db") {
                         Write-Output "Decrypting DB: $file"
                         Decrypt-DBFile $dbKey $file.FullName $outputFile
@@ -526,8 +524,13 @@ function Decrypt-AllFiles ($dbKey, $targetDirectory) {
                                 Decrypt-DBWALFile $dbKey $file.FullName $outputFile
                             }
                     }
-                } catch{
-                    Write-Output "Error decrypting $file."
+                } catch {
+                    if ($_.Exception.Message -like "*Source array was not long enough*"){
+                        Write-Output "Error decrypting $file - File is $($file.Length) bytes."
+                    }
+                    else {
+                        Write-Output "Error decrypting $file - $($_.Exception.Message)"
+                    }
                 }
             } 
         } 
@@ -595,7 +598,7 @@ function Get-SHA512Checksum {
         }
 
         # Write the hash to the output file using UTF8 encoding
-        $hash.Hash | Out-File -FilePath $outputFilePath -Encoding UTF8
+        "$($hash.Hash) - $FilePath" | Out-File -FilePath $outputFilePath -Encoding UTF8
 
         # Copy the hash to the clipboard
         Set-Clipboard -Value $hash.Hash
@@ -605,6 +608,44 @@ function Get-SHA512Checksum {
     }
     catch {
         Write-Error "Error generating SHA512 checksum for '$FilePath': $($_.Exception.Message)"
+        return $null # Return $null in case of error
+    }
+}
+
+function Get-MD5Checksum {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+
+    try {
+        # Check if the file exists
+        if (!(Test-Path -Path $FilePath -PathType Leaf)) {
+            throw "File '$FilePath' not found."
+        }
+
+        # Calculate the MD5
+        $hash = Get-FileHash -Path $FilePath -Algorithm MD5
+
+        # Create the output file path. Replace ".zip" with ".md5.txt" only if it ends with ".zip".
+        # If the file doesn't end with ".zip", simply append ".md5.txt".
+        if ($FilePath -like "*.zip") {
+            $outputFilePath = $FilePath -replace "\.zip$", ".md5.txt"
+        } else {
+            $outputFilePath = $FilePath + ".md5.txt"
+        }
+
+        # Write the hash to the output file using UTF8 encoding
+        "$($hash.Hash) - $FilePath" | Out-File -FilePath $outputFilePath -Encoding UTF8
+
+        # Copy the hash to the clipboard
+        Set-Clipboard -Value $hash.Hash
+
+        Write-Verbose "MD5 checksum for '$FilePath' written to '$outputFilePath' and copied to clipboard."
+        return $outputFilePath # Return the checksum file path
+    }
+    catch {
+        Write-Error "Error generating MD5 checksum for '$FilePath': $($_.Exception.Message)"
         return $null # Return $null in case of error
     }
 }
@@ -646,7 +687,7 @@ function Find-Signature {
                 } elseif ($firstRightNibble -eq 2) {
                     $sizeIndicatorIndex += 4 # Skips the two bytes and the 0x04 after
                 } else {
-                    Write-Verbose "Unexpected nibble value after special signature."
+                    Write-Verbose "Unexpected nibble value after signature."
                     return
                 }
 
@@ -711,7 +752,9 @@ function Start-ZapixDesk {
         [Parameter(Mandatory = $false)]
         [switch]$Offline,
         [Parameter(Mandatory = $false)]
-        [string]$ID
+        [string]$ID,
+        [Parameter(Mandatory = $false)]
+        [string]$OutputPath
     )
     Clear-Host
     Write-Output "
@@ -724,32 +767,38 @@ ______  ___  ______ ___   _______ _____ _____ _   __
                                        ZAPiXDESK         
 # Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
 # URL: https://github.com/kraftdenker/ZAPiXDESK
-# Version: $ZDVersion"
-    if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
-    {
-        $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
-    }
+# Version: $ZDVersion
+# Source Path: $($WhatsAppPath)
+# Output Path: $($OutputPath)"
 
     # Verify Administrator rights 
-#    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
-#    { 
-#        try {
-#            # Elevate to power user
-#            $arguments = "& '" + $myInvocation.MyCommand.Definition + "'" 
-#            Start-Process powershell -Verb runAs -ArgumentList $arguments 
-#            Exit
-#        }
-#        catch {
-#            Write-Output "Unable to elevate to Administrator. Exiting."
-#            Exit
-#        }
-#    }
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
+    { 
+        try {
+            $script_file = $MyInvocation.MyCommand.ScriptBlock.File
+            $script_path = Split-Path -Path $script_file -Parent
+            $argList = foreach ($key in $PSBoundParameters.Keys) {
+                $value = $PSBoundParameters[$key]
+                if ($value -is [switch]) {
+                    "-$key"
+                } elseif ($value -match '\s') {
+                    "-$key `"$value`""
+                } else {
+                    "-$key $value"
+                }
+            }
+            $arguments = $argList -join ' '
+            Start-Process powershell -Verb RunAs -WorkingDirectory $script_path -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$script_file`" $arguments"
+            Exit
+        }
+        catch {
+            Write-Output "Unable to elevate to Administrator. Exiting."
+            Exit
+        }
+    }
+    Add-Type -AssemblyName System.Security
+    Add-Type -AssemblyName System.Windows.Forms
     try {
-        Set-ExecutionPolicy Unrestricted
-    }
-    catch {
-        Write-Output "Unable to set execution policy to Unrestricted."
-    }
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -757,35 +806,30 @@ public class ClipcWrapper {
     [DllImport("clipc.dll")]
     public static extern int GetOfflineDeviceUniqueID(uint cbSalt, byte[] pbSalt, out uint oMethod, ref uint pcbSystemId, byte[] rgbSystemId, uint unk1, uint unk2);
 }
-"@
-    Add-Type -Path "$PSScriptRoot\BouncyCastle.Cryptography.dll"
-    # Verify if DLL loaded successfully 
-    if ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.FullName -like "*BouncyCastle*" }) {
-        Write-Verbose "BouncyCastle assembly present."
-    } else {
-        Write-Verbose "Error: BouncyCastle assembly not loaded. Make sure the BouncyCastle.Cryptography.dll is located in $PSScriptRoot."
+"@ } catch {
+        Write-Warning "Unable to add the Clipcwrapper to utilize GetOfflineDeviceUniqueID - Unless ODUID can be extracted by other means, decryption may not be successful."
+    }
+    try {
+        Add-Type -Path "$PSScriptRoot\BouncyCastle.Cryptography.dll"
+        Write-Verbose "BouncyCastle Assembly loaded."
+    } catch {
+        Write-Error "Error: BouncyCastle assembly not loaded. Make sure the BouncyCastle.Cryptography.dll is located in $PSScriptRoot."
         return
     }
-    Add-Type -AssemblyName System.Security
-
+    if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
+    {
+        $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+    }
+    Set-Variable -Name reverseDate -Value $(Get-Date -Format "yyyyMMddHHmmss") -Scope Global
+    Set-Variable -Name targetOutput -Value "$OutputPath\ZAPiXDESK_$reverseDate" -Scope Global
     Write-Verbose $WhatsAppPath
     Write-Verbose "Copying $WhatsAppPath to $targetOutput"
     Copy-Directory -Source $WhatsAppPath -Destination $targetOutput
     "ZAPiXDESK DATE: $reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-    enum RETRIEVAL_METHOD {
-        ODUID_DEFAULT = 0
-        ODUID_TPM_EK
-        ODUID_UEFI_VARIABLE_TPM
-        ODUID_UEFI_VARIABLE_RANDOMSEED
-        ODUID_UEFI_DEV_LOCK_UNLOCK
-        ODUID_XBOX_CONSOLE_ID
-        ODUID_REGISTRY_ENTRY
-    }
     if (-not $PSBoundParameters.ContainsKey('Offline')){
         $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
-        $mtd = [RETRIEVAL_METHOD]$ODUID.Method
-        "ODUID Extraction Method: $mtd"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-        Write-Output "Method: $($mtd)"
+        "ODUID Extraction Method: $($ODUID.Method)"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Write-Output "Method: $($ODUID.Method)"
         $WhatsAppAppUID = $ODUID.ID
         $hexaWhatsAppAppUID = ConvertTo-HexString $WhatsAppAppUID
         "ODUID: $hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
@@ -802,7 +846,7 @@ public class ClipcWrapper {
     Write-Output "UserKey: $hexaUserKey"
     
     $ns18Output = Get-Key -FilePath "$WhatsAppPath\nondb_settings18.dat" -HasPadding $true
-    $tmp_dec_nondb_settings18 = Join-Path -Path $currentDirectory -ChildPath 'dec_nondb_settings18.dat'
+    $tmp_dec_nondb_settings18 = Join-Path -Path $OutputDirectory -ChildPath 'dec_nondb_settings18.dat'
     [System.IO.File]::WriteAllBytes($tmp_dec_nondb_settings18, $ns18Output)
     Write-Verbose "NS18: $(ConvertTo-HexString($ns18Output))"
     
@@ -817,15 +861,16 @@ public class ClipcWrapper {
     Decrypt-AllFiles $dbKey $targetOutput
 
     # Compresses a directory to a zip file and deletes the source
-    $zipTarget="$currentDirectory\ZAPiXDESK_$reverseDate.zip"
+    $zipTarget="$OutputDirectory\ZAPiXDESK_$reverseDate.zip"
     Compress-Directory -Source $targetOutput -DestinationZipFile $zipTarget
     Write-Output "Compressed file (ZIP) generated: $zipTarget"
-    # Generate integrity HASH
-    $checksumFileZip = Get-SHA512Checksum -FilePath $zipTarget
+    # Generate integrity HASH - Changed to MD5 as computation time for higher algorithms for large files can be minutes instead of seconds.
+    $checksumFileZip = Get-MD5Checksum -FilePath $zipTarget
     if ($checksumFileZip) {
         Write-Verbose "Checksum file (ZIP): $checksumFileZip"
     }
-    Write-Output "SHA512 Hash: $checksumFileZip (hash also copied to clipboard)"
+    Write-Output "MD5 Hash: $checksumFileZip (hash also copied to clipboard)"
+    [Windows.Forms.MessageBox]::Show("WhatsApp acquisition and decryption completed. Results save in $zipTarget", "Acquisition Complete","Ok","Information") | Out-Null
 }
 
 if ($PSBoundParameters.ContainsKey('Offline'))
@@ -849,5 +894,11 @@ else {
     {
         $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
     }
-    Start-ZapixDesk -WhatsAppPath $WhatsAppPath
+    if (-not $PSBoundParameters.ContainsKey('OutputPath'))
+    {
+        Set-Variable -Name OutputDirectory -Value $(Get-Location) -Scope Global
+    } else {
+        Set-Variable -Name OutputDirectory -Value $OutputPath -Scope Global
+    }
+    Start-ZapixDesk -WhatsAppPath $WhatsAppPath -OutputPath $OutputDirectory
 }
