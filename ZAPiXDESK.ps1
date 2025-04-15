@@ -264,7 +264,8 @@ function Unwrap-AesKeyBC {
     catch {
         Write-Error "Error unwrapping key (Bouncy Castle): $($_.Exception.Message)"
         Write-Error $_.Exception | Format-List *
-        return $null
+        [Windows.Forms.MessageBox]::Show("Error unwrapping key (Bouncy Castle): $($_.Exception.Message)", "Acquisition Failed","Ok","Error") | Out-Null
+        exit
     }
 }
 
@@ -285,8 +286,14 @@ function Decrypt-NS{
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
         [boolean]$hasPadding
     )
-	# Decrypt blob DPAPI with Windows API 
+	# Decrypt blob DPAPI with Windows API
+	try {
 	$kek = [System.Security.Cryptography.ProtectedData]::Unprotect($dpapi_blob, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+	} catch {
+	    Write-Output "Generation of KEK failed - this may occur if the ODUID provided is incorrect"
+        [Windows.Forms.MessageBox]::Show("Generation of KEK failed - this may occur if the ODUID provided is incorrect", "Acquisition Failed","Ok","Error") | Out-Null
+		exit
+	}
     Write-Verbose "kek: $( [BitConverter]::ToString($kek).Replace('-', '') )"
     
     # Decrypt wrappedKey
@@ -297,54 +304,57 @@ function Decrypt-NS{
 	Write-Verbose "gcm_key: $gcm_key_hex"
 	# Algorithm definition - AES256GCM 
     # Create the cipher 
-    $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new()
-    $gcmBlockCipher = [Org.BouncyCastle.Crypto.Modes.GcmBlockCipher]::new($cipher) 
-    $parameters = [Org.BouncyCastle.Crypto.Parameters.AeadParameters]::new([Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($gcm_key), 128, $nonce) 
-    $cipher_text_tagged = $cipher_text + $gcmTag
-    # Initialize the cipher for decryption 
-    $null = $gcmBlockCipher.Init($false, $parameters) 
-    # Decrypt the bytes 
-    $second_cipher_text = [byte[]]::new($gcmBlockCipher.GetOutputSize($cipher_text_tagged.Length)) 
-    $len = $gcmBlockCipher.ProcessBytes($cipher_text_tagged, 0, $cipher_text_tagged.Length, $second_cipher_text, 0) 
-    $null = $gcmBlockCipher.DoFinal($second_cipher_text, $len)
+    try {
+        $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new()
+        $gcmBlockCipher = [Org.BouncyCastle.Crypto.Modes.GcmBlockCipher]::new($cipher) 
+        $parameters = [Org.BouncyCastle.Crypto.Parameters.AeadParameters]::new([Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($gcm_key), 128, $nonce) 
+        $cipher_text_tagged = $cipher_text + $gcmTag
+        # Initialize the cipher for decryption
+        $null = $gcmBlockCipher.Init($false, $parameters) 
+        # Decrypt the bytes 
+        $second_cipher_text = [byte[]]::new($gcmBlockCipher.GetOutputSize($cipher_text_tagged.Length)) 
+        $len = $gcmBlockCipher.ProcessBytes($cipher_text_tagged, 0, $cipher_text_tagged.Length, $second_cipher_text, 0) 
+        $null = $gcmBlockCipher.DoFinal($second_cipher_text, $len)
 
-    Write-Verbose "Decrypted-BC nsCipherText(padded): $( [BitConverter]::ToString($second_cipher_text).Replace('-', '') )"
+        Write-Verbose "Decrypted-BC nsCipherText(padded): $( [BitConverter]::ToString($second_cipher_text).Replace('-', '') )"
        
-    $iterations = 10000
+        $iterations = 10000
     
-    # Generate encryption key (encKey) throught PBKDF2
-    $digest= [Org.BouncyCastle.Crypto.Digests.Sha256Digest]::new()
-    $generator = [Org.BouncyCastle.Crypto.Generators.Pkcs5S2ParametersGenerator]::new($digest) 
-    $generator.Init($passphrase, $WhatsAppAppUID, $iterations) 
-    $keyParameter = $generator.GenerateDerivedMacParameters(256) 
-    $encKey = $keyParameter.GetKey()
-    Write-Verbose "EncryptionKey-BC (encKey): $( [BitConverter]::ToString($encKey).Replace('-', '') )"
+        # Generate encryption key (encKey) throught PBKDF2
+        $digest= [Org.BouncyCastle.Crypto.Digests.Sha256Digest]::new()
+        $generator = [Org.BouncyCastle.Crypto.Generators.Pkcs5S2ParametersGenerator]::new($digest) 
+        $generator.Init($passphrase, $WhatsAppAppUID, $iterations) 
+        $keyParameter = $generator.GenerateDerivedMacParameters(256) 
+        $encKey = $keyParameter.GetKey()
+        Write-Verbose "EncryptionKey-BC (encKey): $( [BitConverter]::ToString($encKey).Replace('-', '') )"
     
-    $generator.Init($encKey, $WhatsAppAppUID, $iterations) 
-    $keyParameter = $generator.GenerateDerivedMacParameters(128) 
-    $IV = $keyParameter.GetKey()
-	Write-Verbose "(IV-BC): $( [BitConverter]::ToString($IV).Replace('-', '') )"
+        $generator.Init($encKey, $WhatsAppAppUID, $iterations) 
+        $keyParameter = $generator.GenerateDerivedMacParameters(128) 
+        $IV = $keyParameter.GetKey()
+	    Write-Verbose "(IV-BC): $( [BitConverter]::ToString($IV).Replace('-', '') )"
     
+       # Create the AES object (.NET implementation is simpler to use than bouncycastle`s one)
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.Key = $encKey
+        $aes.IV = $IV
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        if ($hasPadding){
+            $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        } else {
+            $aes.Padding = [System.Security.Cryptography.PaddingMode]::None    
+        }
+        # Create a decryptor
+        $decryptor = $aes.CreateDecryptor($aes.Key, $aes.IV)
 
-    # Create the AES object (.NET implementation is simpler to use than bouncycastle`s one)
-    $aes = [System.Security.Cryptography.Aes]::Create()
-    $aes.Key = $encKey
-    $aes.IV = $IV
-    $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-    if ($hasPadding){
-        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-    } else {
-        $aes.Padding = [System.Security.Cryptography.PaddingMode]::None
-        
+        # Decrypt the data
+        $decryptedBytes = $decryptor.TransformFinalBlock($second_cipher_text, 0, $second_cipher_text.Length) 
+        $aes.Dispose()
+        return [byte[]]$decryptedBytes
+    } catch {
+        Write-Output "Unable to decrypt the data - $($_.Exception.Message)"
+        [Windows.Forms.MessageBox]::Show("Unable to decrypt the data: $($_.Exception.Message)", "Acquisition Failed","Ok","Error") | Out-Null
+        exit
     }
-    # Create a decryptor
-    $decryptor = $aes.CreateDecryptor($aes.Key, $aes.IV)
-
-    # Decrypt the data
-    $decryptedBytes = $decryptor.TransformFinalBlock($second_cipher_text, 0, $second_cipher_text.Length) 
-    $aes.Dispose()
-    return [byte[]]$decryptedBytes
-    
 }
 
 function Get-Key {
@@ -423,8 +433,6 @@ function Decrypt-DBFile ($dbKey, $inputFile, $outputFile) {
     $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new() 
     $blockCipher = [Org.BouncyCastle.Crypto.Modes.OfbBlockCipher]::new($cipher, 128) 
     $keyParameter = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($dbKey)
-    
-  
     $pageSize = 4096
     $inputBytes = [System.IO.File]::ReadAllBytes($inputFile)
     
@@ -454,7 +462,6 @@ function Decrypt-DBFile ($dbKey, $inputFile, $outputFile) {
 }
 
 function Decrypt-DBWALFile ($dbKey, $inputFile, $outputFile) {
-
     $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new() 
     $blockCipher = [Org.BouncyCastle.Crypto.Modes.OfbBlockCipher]::new($cipher, 128) 
     $keyParameter = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($dbKey)
@@ -503,7 +510,6 @@ function Decrypt-DBWALFile ($dbKey, $inputFile, $outputFile) {
 
 # Decrypt all files in current directory 
 function Decrypt-AllFiles ($dbKey, $targetDirectory) { 
-    #delete previous decriptions
     Get-ChildItem -Filter "*.dec.*" -Force | Remove-Item -Force
     $dbFiles = Get-ChildItem -Path $targetDirectory -Filter *.db 
     $walFiles = Get-ChildItem -Path $targetDirectory -Filter *.db-wal 
@@ -626,7 +632,6 @@ function Get-MD5Checksum {
 
         # Calculate the MD5
         $hash = Get-FileHash -Path $FilePath -Algorithm MD5
-
         # Create the output file path. Replace ".zip" with ".md5.txt" only if it ends with ".zip".
         # If the file doesn't end with ".zip", simply append ".md5.txt".
         if ($FilePath -like "*.zip") {
@@ -634,13 +639,11 @@ function Get-MD5Checksum {
         } else {
             $outputFilePath = $FilePath + ".md5.txt"
         }
-
         # Write the hash to the output file using UTF8 encoding
         "$($hash.Hash) - $FilePath" | Out-File -FilePath $outputFilePath -Encoding UTF8
 
         # Copy the hash to the clipboard
         Set-Clipboard -Value $hash.Hash
-
         Write-Verbose "MD5 checksum for '$FilePath' written to '$outputFilePath' and copied to clipboard."
         return $outputFilePath # Return the checksum file path
     }
@@ -769,9 +772,10 @@ ______  ___  ______ ___   _______ _____ _____ _   __
 # URL: https://github.com/kraftdenker/ZAPiXDESK
 # Version: $ZDVersion
 # Source Path: $($WhatsAppPath)
-# Output Path: $($OutputPath)"
+# Output Path: $($OutputDirectory)"
 
     # Verify Administrator rights 
+
     if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 
     { 
         try {
@@ -796,6 +800,7 @@ ______  ___  ______ ___   _______ _____ _____ _   __
             Exit
         }
     }
+
     Add-Type -AssemblyName System.Security
     Add-Type -AssemblyName System.Windows.Forms
     try {
@@ -814,11 +819,16 @@ public class ClipcWrapper {
         Write-Verbose "BouncyCastle Assembly loaded."
     } catch {
         Write-Error "Error: BouncyCastle assembly not loaded. Make sure the BouncyCastle.Cryptography.dll is located in $PSScriptRoot."
-        return
+        exit
     }
     if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
     {
         $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+        if ($null -eq $WhatsAppPath)
+        {
+            Write-Output "WhatsApp installation path not found on this PC. If you are attempting to process a standalone directory structure, please use the -WhatsApp argument."
+            exit
+        }
     }
     Set-Variable -Name reverseDate -Value $(Get-Date -Format "yyyyMMddHHmmss") -Scope Global
     Set-Variable -Name targetOutput -Value "$OutputPath\ZAPiXDESK_$reverseDate" -Scope Global
@@ -826,7 +836,8 @@ public class ClipcWrapper {
     Write-Verbose "Copying $WhatsAppPath to $targetOutput"
     Copy-Directory -Source $WhatsAppPath -Destination $targetOutput
     "ZAPiXDESK DATE: $reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-    if (-not $PSBoundParameters.ContainsKey('Offline')){
+    if (-not $PSBoundParameters.ContainsKey('Offline'))
+    {
         $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
         "ODUID Extraction Method: $($ODUID.Method)"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
         Write-Output "Method: $($ODUID.Method)"
@@ -878,12 +889,26 @@ if ($PSBoundParameters.ContainsKey('Offline'))
     if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
     {
         $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+        if ($null -eq $WhatsAppPath)
+        {
+            Write-Output "WhatsApp installation path not found on this PC. If you are attempting to process a standalone directory structure, please use the -WhatsApp argument."
+            exit
+        }
+    }
+    else {
+        $WhatsAppPath = (Resolve-Path $WhatsAppPath).Path
     }
     if (-not $PSBoundParameters.ContainsKey('ID')){
-        Write-Output "The parameter 'ID' is required when using this script in Offline mode"
+        Write-Output "The 'ID' argument is required when using this script in Offline mode"
         exit
     }
-    Start-ZapixDesk -WhatsAppPath $WhatsAppPath -Offline -ID $ID
+    if (-not $PSBoundParameters.ContainsKey('OutputPath'))
+    {
+        Set-Variable -Name OutputDirectory -Value $PWD.Path -Scope Global
+    } else {
+        Set-Variable -Name OutputDirectory -Value $OutputPath -Scope Global
+    }
+    Start-ZapixDesk -WhatsAppPath $WhatsAppPath -Offline -ID $ID -OutputPath $OutputDirectory
 } elseif ($PSBoundParameters.ContainsKey('GetID')){
     $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
     $ODUID_HEX = ConvertTo-HexString $ODUID.ID
@@ -893,10 +918,18 @@ else {
     if (-not $PSBoundParameters.ContainsKey('WhatsAppPath'))
     {
         $WhatsAppPath = Get-AppLocalStatePath -AppName "WhatsApp"
+        if ($null -eq $WhatsAppPath)
+        {
+            Write-Output "WhatsApp installation path not found on this PC. If you are attempting to process a standalone directory structure, please use the -WhatsApp argument."
+            exit
+        }
+    }
+    else {
+        $WhatsAppPath = (Resolve-Path $WhatsAppPath).Path
     }
     if (-not $PSBoundParameters.ContainsKey('OutputPath'))
     {
-        Set-Variable -Name OutputDirectory -Value $(Get-Location) -Scope Global
+        Set-Variable -Name OutputDirectory -Value $PWD.Path -Scope Global
     } else {
         Set-Variable -Name OutputDirectory -Value $OutputPath -Scope Global
     }
