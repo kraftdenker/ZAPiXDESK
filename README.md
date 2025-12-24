@@ -1,4 +1,4 @@
-#Attention
+# Attention
 Since 9th December 2025, Meta changed WhatsApp Desktop platform from UWP (Universal Windows Platform) to WebView2 (Windows Services + Browser Services).
 Soon, new reverse efforts will be launched aimed to forensically extract WhatsApp data.
 
