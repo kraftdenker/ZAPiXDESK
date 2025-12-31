@@ -1,6 +1,19 @@
+<span style="color:red">⚠️ Attention!</span>
 # Attention
 Since 9th December 2025, Meta changed WhatsApp Desktop platform from UWP (Universal Windows Platform) to WebView2 (Windows Services + Browser Services).
 Soon, new reverse efforts will be launched aimed to forensically extract WhatsApp data.
+
+An palliative method is restart WEBVIEW2 with developer tools activated, and use ZAPiXWEB technique <https://github.com/kraftdenker/ZAPiXWEB>:
+Kill active WhatsApp.Root process using taskmanager or using command line:
+```
+Stop-Process -Name "WhatsApp.Root" -Force
+Start-Sleep -Milliseconds 300
+```
+And restart it passing the following argument:
+```
+C:\Program Files\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm>WhatsApp.Root.exe --auto-open-devtools-for-tabs
+```
+## Reverse effort has already started to locate data used to derive the encryption key of the new sqlite databases.
 
 # ZAPiXDESK
 WhatsApp Desktop Live Forensiscs - Decryption and Extraction Technique
