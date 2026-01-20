@@ -1,7 +1,8 @@
 <span style="color:red">⚠️ Attention!</span>
 # Attention
+New version 2.1 is now able to decrypt local databases from the new WEBVIEW2 ARCH.
+
 Since 9th December 2025, Meta changed WhatsApp Desktop platform from UWP (Universal Windows Platform) to WebView2 (Windows Services + Browser Services).
-New version 2.1 is now able to decrypt local databases.
 
 Another possible method to extract data is restart WEBVIEW2 application with developer tools activated, and use ZAPiXWEB technique <https://github.com/kraftdenker/ZAPiXWEB>:
 
