@@ -1,10 +1,11 @@
 <span style="color:red">⚠️ Attention!</span>
 # Attention
 Since 9th December 2025, Meta changed WhatsApp Desktop platform from UWP (Universal Windows Platform) to WebView2 (Windows Services + Browser Services).
-Soon, new reverse efforts will be launched aimed to forensically extract WhatsApp data.
+New version 2.1 is now able to decrypt local databases.
 
-An palliative method is restart WEBVIEW2 with developer tools activated, and use ZAPiXWEB technique <https://github.com/kraftdenker/ZAPiXWEB>:
-Kill active WhatsApp.Root process using taskmanager or using command line:
+Another possible method to extract data is restart WEBVIEW2 application with developer tools activated, and use ZAPiXWEB technique <https://github.com/kraftdenker/ZAPiXWEB>:
+
+-Kill active WhatsApp.Root process using taskmanager or using command line:
 ```
 Stop-Process -Name "WhatsApp.Root" -Force
 Start-Sleep -Milliseconds 300
@@ -32,17 +33,28 @@ Copyrights: 2025 Alberto Magno <alberto.magno@gmail.com>
 LICENSE GNU General Public License v3.0
 
 # Description: 
-A script that extracts DBKey and decrypts all SQLITE3 database files (including db and write-ahead-logfiles ). 
+A script that extracts DBKeys and decrypts all SQLITE3 database files (including db and write-ahead-logfiles ). 
 On completion a ZIP file containing all WhatsApp decrypted LocalState db's and a MD5 is calculated.
 Some information also in: https://medium.com/@alberto.magno/whatsapp-desktop-and-web-live-forensics-4n6-233f640e9fb3
 
-Technique based on reverse-engineering-fu (yes! you do not need to use SQLite3 SEE to decrypt) and some info contained in following paper:
+Techinique for WEBVIEW2 is full based on reverse-engineering-fu passing over WEB, CLR and NATIVE layers of the architecture.
+
+Technique for UWP is based on reverse-engineering-fu (yes! you do not need to use SQLite3 SEE to decrypt) and some info contained in following paper:
 Giyoon Kim, Uk Hur, Soojin Kang, Jongsung Kim,Analyzing the Web and UWP versions of WhatsApp for digital forensics,
 Forensic Science International: Digital Investigation,Volume 52,2025,301861,ISSN 2666-2817,
 https://doi.org/10.1016/j.fsidi.2024.301861.
 (https://www.sciencedirect.com/science/article/pii/S2666281724001884)
 
-# Operation:
+# WEBVIEW2 ARCH Operation:
+- First, it obtains the OfflineDeviceUniqueID, indicating the method used (TPM, REGISTRY, etc...), used in keys derivations linked to the machine.
+- The tool copies the WhatsApp localstate files (where SQLite3 DB files are located) to operate them
+- It generates the first decryption key to session.db based on staticKey protect by DPAPI-NG than recovers clientKey from WAL file as database is configured to secure-deletion PRAGMA.
+- With clientKey, it is able to derives encryption key using OOUID and statickey to decrypt nativeSettings database, where all other keys were stored and are recovered from WAL file.
+- DbKeys are used to decrypt the others databases.
+- All decrypted files and the other content of LocalState are zipped.
+- MD5 HASH file is generates for chain-of-custody purposes.
+
+# UWP ARCH Operation:
 - First, it obtains the OfflineDeviceUniqueID, indicating the method used (TPM, REGISTRY, etc...), used in keys derivation linked to the machine.
 - The tool copies the WhatsApp localstate files (where SQLite3 DB files are located) to operate them
 - It generates the userKey to generate the dbKey for decrypting the files.
