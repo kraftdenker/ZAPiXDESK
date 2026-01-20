@@ -15,7 +15,6 @@ And restart it passing the following argument:
 ```
 C:\Program Files\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm>WhatsApp.Root.exe --auto-open-devtools-for-tabs
 ```
-## Reverse effort has already started to locate data used to derive the encryption key of the new sqlite databases.
 
 # ZAPiXDESK
 WhatsApp Desktop Live Forensiscs - Decryption and Extraction Technique
