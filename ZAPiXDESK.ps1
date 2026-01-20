@@ -12,22 +12,37 @@ param (
 )
 
 # Windows WhatsApp Desktop
-# Version: 2.0
-# Revised Date: 04/12/25
-# Revised by: Corey Forman (digitalsleuth)
+# Version: 2.1
+# Revised Date: 20/01/26
+# Revised by: Alberto Magno (kraftdenker)
 
-# Copyright: 2025 Alberto Magno <alberto.magno@gmail.com> 
+
+# Copyright: 2026 Alberto Magno <alberto.magno@gmail.com> 
 # URL: https://github.com/kraftdenker/ZAPiXDESK
 
 # Description: A script that extracts DBKey and decrypt all SQLite3 database files (including db and write-ahead-logfiles ). At final a ZIP file containing all WhatsAppDesk localstate decripted.
 
-# Technique based on reverse-engineering-fu (yes! you do not need to use SQLite3 SEE to decrypt) and infos contained in following paper:
+# First technique based on reverse-engineering-fu (yes! you do not need to use SQLite3 SEE to decrypt) and infos contained in following paper:
 # Giyoon Kim, Uk Hur, Soojin Kang, Jongsung Kim,Analyzing the Web and UWP versions of WhatsApp for digital forensics,
 # Forensic Science International: Digital Investigation,Volume 52,2025,301861,ISSN 2666-2817,
 # https://doi.org/10.1016/j.fsidi.2024.301861.
 # (https://www.sciencedirect.com/science/article/pii/S2666281724001884)
 
-# Updates: 12 April 2025 - Corey Forman @digitalsleuth
+
+
+# Updates: 
+# 20 January 2026 - Alberto Magno @kraftdenker
+# After M3t4 changes in 09/12/25, it has been added new strategie to address the new WEBVIEW2 architecture using reverse-fu techniques.
+# Recover of clientKey from session database to derive other database (nativeSettings) witch cares other encryptions keys to decode the 
+# other databases.
+# New DPAPI-NG method to protect bytes and an raw DB-WAL recovery method to get securited managed registers.
+# Important key ideas:
+# - Session.db and session.db-wal stores all sessions clientKeys from the current userKey
+# - It creates a subdir named with sha1 from clientKey
+# - Inside this subdir, it is stored nativeSettings.db with other types of keys (1 ,2 ,3 )
+# - Keys type 1, used to decrypt genericStorageDB (Messages), type 2 to decrypt the other ones.
+
+# 12 April 2025 - Corey Forman @digitalsleuth
 # The following signatures were observed before each of the values during analysis of multiple
 # nondb_settings dat files
 # dpapi_blob signature: 02010430. If the next byte is not 81 or 82, Then skip that and 2 more bytes and read the right nibble of the 4th byte to 
@@ -58,22 +73,28 @@ param (
 
 $global:metaDataFileName = "ZAPiXDESK.mtd.txt"
 $global:whatsappDll_passphrase = "5303b14c0984e9b13fe75770cd25aaf7"
-$global:ZDVersion = "2.0.0"
+$global:ZDVersion = "2.1.0"
+$global:webview2_staticBytes = "23a7f19c11e5bd784235c96f85d24913"
+$global:getOUID_salt = "0x6300760031006700310067007600"
+$global:pbkdf_iterations = 10000
 
 function Convert-HexStringToByteArray {
     param (
         [string]$hexString
     )
 
-    # Remove any spaces or dashes from the hex string
-    $hexString = $hexString -replace '[-\s]', ''
+    # Remove espaços extras no início e fim
+    $hexString = $hexString.Trim()
 
-    # Ensure the hex string length is even
+    # Remove qualquer caractere que não seja válido em hexadecimal (0-9, A-F, a-f)
+    $hexString = $hexString -replace '[^0-9A-Fa-f]', ''
+
+    # Verifica se o comprimento é par
     if ($hexString.Length % 2 -ne 0) {
-        throw "The hex string must have an even length."
+        throw "The hex string must have an even length. Actual length: $($hexString.Length)"
     }
 
-    # Convert the hex string to a byte array
+    # Converte a string em array de bytes
     $byteArray = @()
     for ($i = 0; $i -lt $hexString.Length; $i += 2) {
         $byteValue = [Convert]::ToByte($hexString.Substring($i, 2), 16)
@@ -82,6 +103,7 @@ function Convert-HexStringToByteArray {
 
     return ,$byteArray
 }
+
 $global:whatsappDll_passphrase_bc = (Convert-HexStringToByteArray $whatsappDll_passphrase)
 
 function Get-AppLocalStatePath {
@@ -318,17 +340,15 @@ function Decrypt-NS{
 
         Write-Verbose "Decrypted-BC nsCipherText(padded): $( [BitConverter]::ToString($second_cipher_text).Replace('-', '') )"
        
-        $iterations = 10000
-    
         # Generate encryption key (encKey) throught PBKDF2
         $digest= [Org.BouncyCastle.Crypto.Digests.Sha256Digest]::new()
         $generator = [Org.BouncyCastle.Crypto.Generators.Pkcs5S2ParametersGenerator]::new($digest) 
-        $generator.Init($passphrase, $WhatsAppAppUID, $iterations) 
+        $generator.Init($passphrase, $WhatsAppAppUID, $global:pbkdf_iterations) 
         $keyParameter = $generator.GenerateDerivedMacParameters(256) 
         $encKey = $keyParameter.GetKey()
         Write-Verbose "EncryptionKey-BC (encKey): $( [BitConverter]::ToString($encKey).Replace('-', '') )"
     
-        $generator.Init($encKey, $WhatsAppAppUID, $iterations) 
+        $generator.Init($encKey, $WhatsAppAppUID, $global:pbkdf_iterations) 
         $keyParameter = $generator.GenerateDerivedMacParameters(128) 
         $IV = $keyParameter.GetKey()
 	    Write-Verbose "(IV-BC): $( [BitConverter]::ToString($IV).Replace('-', '') )"
@@ -745,6 +765,169 @@ function Find-Signature {
     Write-Verbose "Signature $Signature not found."
 }
 
+function Get-WalSettingsData {
+    param (
+        [string]$FilePath
+    )
+
+    if (-not (Test-Path $FilePath)) { 
+        Write-Error "File not found: $FilePath"
+        return $null 
+    }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+    } catch {
+        Write-Error "Error reading file: $($_.Exception.Message)"
+        return $null
+    }
+
+    $pageSize = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 8))
+    $offset = 32
+    $results = New-Object System.Collections.Generic.List[PSObject]
+
+    while ($offset + 24 + $pageSize -le $bytes.Length) {
+        $pStart = $offset + 24
+        $pEnd = $pStart + $pageSize
+        
+        # scan byte per byte
+        for ($cursor = $pStart; $cursor -lt ($pEnd - 3); $cursor++) {
+            
+            # Header Size 3  (Key, Value)
+            if ($bytes[$cursor] -eq 0x03) {
+                $kType = $bytes[$cursor+1]
+                $vType = $bytes[$cursor+2]
+                
+                $kVal = $null
+                $kLen = 0
+                $dataStart = $cursor + 3
+
+                # Identify Key
+                if ($kType -eq 8) { $kVal = 0; $kLen = 0 }
+                elseif ($kType -eq 9) { $kVal = 1; $kLen = 0 }
+                elseif ($kType -eq 1) { 
+                    $kVal = [int][sbyte]$bytes[$dataStart]
+                    $kLen = 1 
+                }
+
+                # Filter keys (0 to 10)
+                if ($null -ne $kVal -and ($kVal -ge 0 -and $kVal -le 10)) {
+                    $blobHex = ""
+                    $status = ""
+
+                    # Case A: Value is BLOB of 32 bytes (Type 76 / 0x4C)
+                    if ($vType -eq 0x4C) {
+                        if (($dataStart + $kLen + 32) -le $pEnd) {
+                            $blob = New-Object byte[] 32
+                            [Buffer]::BlockCopy($bytes, ($dataStart + $kLen), $blob, 0, 32)
+                            $blobHex = [BitConverter]::ToString($blob).Replace("-","")
+                            $status = "32 bytes"
+                        }
+                    }
+                    # Caso B: Value é NULL (Tipo 0)
+                    elseif ($vType -eq 0) {
+                        $blobHex = "[NULL]"
+                        $status = "Null"
+                    }
+
+                    if ($status -ne "") {
+                        $results.Add([PSCustomObject]@{
+                            Frame    = "F" + [Math]::Floor(($offset-32)/($pageSize+24))
+                            Key      = $kVal
+                            Status   = $status
+                            HexBlob  = $blobHex
+                            DBPage   = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, $offset))
+                        })
+                    }
+                }
+            }
+        }
+        $offset += 24 + $pageSize
+    }
+
+    return $results
+}
+
+function Protect-WebView2Secret {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$HexInput,
+        
+        [Parameter(Mandatory=$false)]
+        [string]$Descriptor = "LOCAL=user"
+    )
+
+    # 1. Definir e Adicionar o tipo C# (apenas se não existir)
+    if (-not ([System.Management.Automation.PSTypeName]'DpapiNgInteropV2').Type) {
+        $code = @"
+        using System;
+        using System.Runtime.InteropServices;
+
+        public static class DpapiNgInteropV2 {
+            [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
+            public static extern int NCryptCreateProtectionDescriptor(string descriptorString, uint flags, out IntPtr phDescriptor);
+
+            [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
+            public static extern int NCryptCloseProtectionDescriptor(IntPtr hDescriptor);
+
+            [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
+            public static extern int NCryptProtectSecret(IntPtr hDescriptor, uint dwFlags, byte[] pbData, int cbData, IntPtr pMemPara, IntPtr hWnd, out IntPtr ppbProtectedBlob, out int pcbProtectedBlob);
+
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr LocalFree(IntPtr hMem);
+        }
+"@
+        Add-Type -TypeDefinition $code
+    }
+
+    # 2. Convert Hex String to Byte Array
+    $cleanHex = $HexInput.Trim() -replace '[^0-9A-Fa-f]', ''
+    if ($cleanHex.Length % 2 -ne 0) { throw "String Hexadecimal inválida." }
+    
+    $inputBytes = New-Object byte[] ($cleanHex.Length / 2)
+    for ($i = 0; $i -lt $cleanHex.Length; $i += 2) {
+        $inputBytes[$i/2] = [Convert]::ToByte($cleanHex.Substring($i, 2), 16)
+    }
+
+    # 3. Protection DPAPI-NG
+    $hDescriptor = [IntPtr]::Zero
+    $res = [DpapiNgInteropV2]::NCryptCreateProtectionDescriptor($Descriptor, 0, [ref]$hDescriptor)
+    
+    if ($res -ne 0) {
+        Write-Error "Error creating descriptor: $res"
+        return $null
+    }
+
+    try {
+        $ptrOut = [IntPtr]::Zero
+        $sizeOut = 0
+        $resProtect = [DpapiNgInteropV2]::NCryptProtectSecret($hDescriptor, 0, $inputBytes, $inputBytes.Length, [IntPtr]::Zero, [IntPtr]::Zero, [ref]$ptrOut, [ref]$sizeOut)
+
+        if ($resProtect -eq 0) {
+            $protected = New-Object byte[] $sizeOut
+            [Runtime.InteropServices.Marshal]::Copy($ptrOut, $protected, 0, $sizeOut)
+            
+            # Extract first 32 bytes
+            $sessionDBSecret = $protected[0..31]
+            
+            # Return data
+            return [PSCustomObject]@{
+                FullBlob    = $protected
+                Secret32    = $sessionDBSecret
+                HexSecret32 = [BitConverter]::ToString($sessionDBSecret).Replace('-', '')
+            }
+        } else {
+            Write-Error "Error protecting bytes: code $resProtect"
+            return $null
+        }
+    }
+    finally {
+        # Memory cleaning
+        if ($ptrOut -ne [IntPtr]::Zero) { [DpapiNgInteropV2]::LocalFree($ptrOut) | Out-Null }
+        if ($hDescriptor -ne [IntPtr]::Zero) { [DpapiNgInteropV2]::NCryptCloseProtectionDescriptor($hDescriptor) | Out-Null }
+    }
+}
+
 #########################################################################################################
 # Main 
 
@@ -838,7 +1021,7 @@ public class ClipcWrapper {
     "ZAPiXDESK DATE: $reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
     if (-not $PSBoundParameters.ContainsKey('Offline'))
     {
-        $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
+        $ODUID = Get-OfflineDeviceUniqueID -Salt $global:getOUID_salt
         "ODUID Extraction Method: $($ODUID.Method)"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
         Write-Output "Method: $($ODUID.Method)"
         $WhatsAppAppUID = $ODUID.ID
@@ -852,24 +1035,149 @@ public class ClipcWrapper {
         "ODUID: $hexaWhatsAppAppUID"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
         Write-Output "ODUID: $hexaWhatsAppAppUID"
      }
-    $userKey = Get-Key -FilePath "$WhatsAppPath\nondb_settings16.dat" -HasPadding $true
-    $hexaUserKey = ConvertTo-HexString $userKey 
-    Write-Output "UserKey: $hexaUserKey"
-    
-    $ns18Output = Get-Key -FilePath "$WhatsAppPath\nondb_settings18.dat" -HasPadding $true
-    $tmp_dec_nondb_settings18 = Join-Path -Path $OutputDirectory -ChildPath 'dec_nondb_settings18.dat'
-    [System.IO.File]::WriteAllBytes($tmp_dec_nondb_settings18, $ns18Output)
-    Write-Verbose "NS18: $(ConvertTo-HexString($ns18Output))"
-    
-    $dbKey = Get-Key -FilePath $tmp_dec_nondb_settings18 -UserKey $userKey -HasPadding $false
-    $hexaDBKey = ConvertTo-HexString $dbKey 
-    Write-Output "DBKey: $hexaDBKey"
-    "DBKEY: $hexaDBKey"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
-    Remove-Item $tmp_dec_nondb_settings18
+     
+     # Detect WhatsApp Desktop architecture
+    $sessionDBFileExists = Test-Path -Path "$WhatsAppPath\session.db" -PathType Leaf
+    $sessionsDirExists = Test-Path -Path "$WhatsAppPath\sessions" -PathType Container
 
-    # Decrypt all-files
-    Write-Output "Decrypting databases..."
-    Decrypt-AllFiles $dbKey $targetOutput
+    if ($sessionDBFileExists -and $sessionsDirExists) {
+        $staticKeyBytes = Convert-HexStringToByteArray $global:webview2_staticBytes
+        Write-Output "(staticKeyBytes): $( [BitConverter]::ToString($staticKeyBytes).Replace('-', '') )"
+       
+        
+        $sessionDBSecretData = Protect-WebView2Secret $global:webview2_staticBytes
+        $sessionDBSecret = $sessionDBSecretData.Secret32 
+        Write-Output "(sessionDBSecret): $( [BitConverter]::ToString($sessionDBSecret).Replace('-', ''))"
+        Write-Output "Decrypting session.db-wal"
+        Decrypt-DBWALFile $sessionDBSecret "$targetOutput\session.db-wal" "$targetOutput\session.dec.db-wal"
+        Write-Output "Decrypting session.db"
+        Decrypt-DBFile $sessionDBSecret "$targetOutput\session.db" "$targetOutput\session.dec.db"
+        
+        #Decrypt-AllFiles $sessionDBSecret ($targetOutput)
+        Write-Output $targetOutput"\session.dec.db-wal"
+        $clientKeyList = Get-WalSettingsData $targetOutput"\session.dec.db-wal"
+        $clientKey = Convert-HexStringToByteArray $clientKeyList[-1].HexBlob
+        Write-Output "(clientKey): $( [BitConverter]::ToString($clientKey).Replace('-', '') )"
+        #Write-Output $clientKey
+        
+        #Session dir
+        $sha1 = [System.Security.Cryptography.SHA1]::Create()
+        $hashBytes = $sha1.ComputeHash($clientKey)
+        $targetSession = [BitConverter]::ToString($hashBytes).Replace('-', '') 
+        Write-Output "(SessionDirectory Name): $targetSession"
+        
+        #DB files
+        $publisherKey = $ODUID.ID 
+        Write-Output "(publisherKey): $( [BitConverter]::ToString($publisherKey).Replace('-', '') )"
+        
+        # Generate encryption key (auxKey2) throught PBKDF2
+        $digest= [Org.BouncyCastle.Crypto.Digests.Sha256Digest]::new()
+        $generator = [Org.BouncyCastle.Crypto.Generators.Pkcs5S2ParametersGenerator]::new($digest) 
+        $generator.Init($clientKey, $publisherKey, $global:pbkdf_iterations) 
+        $keyParameter = $generator.GenerateDerivedMacParameters(256) 
+        $auxKey = $keyParameter.GetKey()
+        Write-Output "EncryptionKey-BC (encKey): $( [BitConverter]::ToString($auxKey).Replace('-', '') )"
+        # Generate IV throught PBKDF2
+        $generator.Init($auxKey, $publisherKey, $global:pbkdf_iterations) 
+        $keyParameter = $generator.GenerateDerivedMacParameters(128) 
+        $IV = $keyParameter.GetKey()
+        Write-Output "(IV-BC): $( [BitConverter]::ToString($IV).Replace('-', '') )"
+        
+        # Create the AES object 
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.Key = $auxKey
+        $aes.IV = $IV
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7 #None
+        # Create a encryptor
+        $encryptor = $aes.CreateEncryptor($aes.Key, $aes.IV)
+        # Encrypt the key
+        $dbKey = $encryptor.TransformFinalBlock($staticKeyBytes, 0, $staticKeyBytes.Length) 
+        $aes.Dispose()
+        
+        #Crop first (32 bytes)
+        $dbKey = $dbKey[0..63] 
+
+        Write-Output "(DBKEY): $( [BitConverter]::ToString($dbKey).Replace('-', '') )"
+        $workingDir = "$targetOutput\sessions\$targetSession"
+        
+        Write-Output "Decrypting nativeSettings.db-wal"
+        Decrypt-DBWALFile $dbKey ("$workingDir\nativeSettings.db-wal") ("$workingDir\nativeSettings.dec.db-wal")
+        Write-Output "Decrypting nativeSettings.db"
+        Decrypt-DBFile $dbKey ("$workingDir\nativeSettings.db") ("$workingDir\nativeSettings.dec.db")
+
+        
+        $databaseKeyList = Get-WalSettingsData "$workingDir\nativeSettings.dec.db-wal"
+        #Write-Verbose $databaseKeyList
+        
+
+        if ($databaseKeyList) {
+            # 2. grup Keys filter keys types 1, 2 e 3
+            $keyGroup = $databaseKeyList | Where-Object { $_.Key -in 1, 2, 3 } | Group-Object Key
+
+            foreach ($keyType in $keyGroup) {
+                # get latest key from keytype
+                $lastFromThisType = $keyType.Group | Select-Object -Last 1
+                
+                $currentKey = $lastFromThisType.Key
+                $dbKey = Convert-HexStringToByteArray $lastFromThisType.HexBlob
+                switch ($currentKey) {
+                    1 {
+                        Write-Output "Decrypting genericStorage.db-wal"
+                        Decrypt-DBWALFile $dbKey ("$workingDir\genericStorage.db-wal") ("$workingDir\genericStorage.dec.db-wal")
+                        Write-Output "Decrypting genericStorage.db"
+                        Decrypt-DBFile $dbKey ("$workingDir\genericStorage.db") ("$workingDir\genericStorage.dec.db")
+                    }
+                    2 {
+                        Write-Output "Decrypting abprops.db-wal"
+                        Decrypt-DBWALFile $dbKey ("$workingDir\abprops.db-wal") ("$workingDir\abprops.dec.db-wal")
+                        Write-Output "Decrypting abprops.db"
+                        Decrypt-DBFile $dbKey ("$workingDir\abprops.db") ("$workingDir\abprops.dec.db")
+                        Write-Output "Decrypting contacts.db-wal"
+                        Decrypt-DBWALFile $dbKey ("$workingDir\contacts.db-wal") ("$workingDir\contacts.dec.db-wal")
+                        Write-Output "Decrypting contacts.db"
+                        Decrypt-DBFile $dbKey ("$workingDir\contacts.db") ("$workingDir\contacts.dec.db")
+                        Write-Output "Decrypting contactsState.db-wal"
+                        Decrypt-DBWALFile $dbKey ("$workingDir\contactsState.db-wal") ("$workingDir\contactsState.dec.db-wal")
+                        Write-Output "Decrypting contactsState.db"
+                        Decrypt-DBFile $dbKey ("$workingDir\contactsState.db") ("$workingDir\contactsState.dec.db")
+                        Write-Output "Decrypting mediaDownloads.db-wal"
+                        Decrypt-DBWALFile $dbKey ("$workingDir\mediaDownloads.db-wal") ("$workingDir\mediaDownloads.dec.db-wal")
+                        Write-Output "Decrypting mediaDownloads.db"
+                        Decrypt-DBFile $dbKey ("$workingDir\mediaDownloads.db") ("$workingDir\mediaDownloads.dec.db")
+                    }
+                    3 {
+                        #Write-Warning "NOP"
+                    }
+                    Default {
+                        #Write-Warning "NOP"
+                    }  
+                }
+            }
+        } else {
+            Write-Warning "Error processing nativeSettings WAL file."
+        }
+        
+    } else {
+        $userKey = Get-Key -FilePath "$WhatsAppPath\nondb_settings16.dat" -HasPadding $true
+        $hexaUserKey = ConvertTo-HexString $userKey 
+        Write-Output "UserKey: $hexaUserKey"
+        
+        $ns18Output = Get-Key -FilePath "$WhatsAppPath\nondb_settings18.dat" -HasPadding $true
+        $tmp_dec_nondb_settings18 = Join-Path -Path $OutputDirectory -ChildPath 'dec_nondb_settings18.dat'
+        [System.IO.File]::WriteAllBytes($tmp_dec_nondb_settings18, $ns18Output)
+        Write-Verbose "NS18: $(ConvertTo-HexString($ns18Output))"
+        
+        $dbKey = Get-Key -FilePath $tmp_dec_nondb_settings18 -UserKey $userKey -HasPadding $false
+        $hexaDBKey = ConvertTo-HexString $dbKey 
+        Write-Output "DBKey: $hexaDBKey"
+        "DBKEY: $hexaDBKey"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
+        Remove-Item $tmp_dec_nondb_settings18
+
+        # Decrypt all-files
+        Write-Output "Decrypting databases..."
+        Decrypt-AllFiles $dbKey $targetOutput
+    }     
 
     # Compresses a directory to a zip file and deletes the source
     $zipTarget="$OutputDirectory\ZAPiXDESK_$reverseDate.zip"
@@ -910,7 +1218,7 @@ if ($PSBoundParameters.ContainsKey('Offline'))
     }
     Start-ZapixDesk -WhatsAppPath $WhatsAppPath -Offline -ID $ID -OutputPath $OutputDirectory
 } elseif ($PSBoundParameters.ContainsKey('GetID')){
-    $ODUID = Get-OfflineDeviceUniqueID -Salt "0x6300760031006700310067007600"
+    $ODUID = Get-OfflineDeviceUniqueID -Salt $global:getOUID_salt
     $ODUID_HEX = ConvertTo-HexString $ODUID.ID
     Write-Output "ODUID: $ODUID_HEX"
 }
