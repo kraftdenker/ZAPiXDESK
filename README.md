@@ -11,6 +11,10 @@ Another possible method to extract data is restart WEBVIEW2 application with dev
 Stop-Process -Name "WhatsApp.Root" -Force
 Start-Sleep -Milliseconds 300
 ```
+Add the following environment variable to all users:
+```
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--auto-open-devtools-for-tabs
+```
 And restart it passing the following argument:
 ```
 C:\"Program Files"\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm\WhatsApp.Root.exe --auto-open-devtools-for-tabs
