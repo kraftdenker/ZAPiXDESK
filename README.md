@@ -13,7 +13,7 @@ Start-Sleep -Milliseconds 300
 ```
 And restart it passing the following argument:
 ```
-C:\Program Files\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm>WhatsApp.Root.exe --auto-open-devtools-for-tabs
+C:\Program Files\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm\WhatsApp.Root.exe --auto-open-devtools-for-tabs
 ```
 
 # ZAPiXDESK
