@@ -4,22 +4,6 @@ New version 2.1 is now able to decrypt local databases from the new WEBVIEW2 ARC
 
 Since 9th December 2025, Meta changed WhatsApp Desktop platform from UWP (Universal Windows Platform) to WebView2 (Windows Services + Browser Services).
 
-Another possible method to extract data is restart WEBVIEW2 application with developer tools activated, and use ZAPiXWEB technique <https://github.com/kraftdenker/ZAPiXWEB>:
-
--Kill active WhatsApp.Root process using taskmanager or using command line:
-```
-Stop-Process -Name "WhatsApp.Root" -Force
-Start-Sleep -Milliseconds 300
-```
-Add the following environment variable to all users:
-```
-WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--auto-open-devtools-for-tabs
-```
-And restart it passing the following argument:
-```
-C:\"Program Files"\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm\WhatsApp.Root.exe --auto-open-devtools-for-tabs
-```
-
 # ZAPiXDESK
 WhatsApp Desktop Live Forensiscs - Decryption and Extraction Technique
 
@@ -117,6 +101,23 @@ This script will take the following arguments:
 -GetID
 ```
 - This will get only the ODUID as a hex string for use in offline decryption.
+
+# Alternative method using ZAPiXWEB
+As WEBVIEW2 has a web layer, an alternative method to extract data is restart application with developer tools activated, and use ZAPiXWEB technique <https://github.com/kraftdenker/ZAPiXWEB> on developer console following these steps:
+
+-Kill active WhatsApp.Root process using taskmanager or using command line:
+```
+Stop-Process -Name "WhatsApp.Root" -Force
+Start-Sleep -Milliseconds 300
+```
+-Add the following environment variable to all users:
+```
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--auto-open-devtools-for-tabs
+```
+-And restart it passing the following argument:
+```
+C:\"Program Files"\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm\WhatsApp.Root.exe --auto-open-devtools-for-tabs
+```
 
 
 Have a nice 4N6!
