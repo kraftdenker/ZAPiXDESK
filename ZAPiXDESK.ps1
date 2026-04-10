@@ -136,9 +136,9 @@ function Get-AppLocalStatePath {
     }
 }
 
-# Function to copy the contents of a directory to a destination,
-# creating or clearing the destination if it exists, waiting for completion,
-# and handling individual file copy errors.
+# Function to copy the contents of a directory to a destination.
+# Uses robocopy instead of Copy-Item to handle locked/in-use UWP files
+# (e.g. WhatsApp Desktop databases held open by the running process).
 function Copy-Directory {
     param(
         [Parameter(Mandatory = $true)]
@@ -149,38 +149,54 @@ function Copy-Directory {
     )
 
     try {
-        # Check if the source directory exists
         if (!(Test-Path -Path $Source -PathType Container)) {
             throw "Source directory '$Source' not found."
         }
 
-        # Create the destination directory if it doesn't exist
         if (!(Test-Path -Path $Destination -PathType Container)) {
             New-Item -ItemType Directory -Path $Destination -Force | Out-Null
         } else {
-            # Clear the destination directory if it already exists
             Write-Verbose "Clearing destination directory: $Destination"
             Get-ChildItem -Path $Destination -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
 
-        # Copy the contents of the source directory to the destination
-        Get-ChildItem -Path $Source -Force -Recurse | ForEach-Object {
-            $targetPath = Join-Path -Path $Destination -ChildPath ($_.FullName.Substring($Source.Length))
-            if ($_.PSIsContainer) {
-                Write-Verbose "Creating directory: $targetPath"
-                New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
-            } else {
-                try {
-                    Write-Verbose "Copying file: $($_.FullName) to $targetPath"
-                    Copy-Item -Path $_.FullName -Destination $targetPath -Force -ErrorAction Stop # Stop on error for each file
-                }
-                catch {
-                    Write-Warning "Failed to copy '$($_.FullName)': $($_.Exception.Message)"
+        Write-Verbose "Copying with robocopy: $Source -> $Destination"
+        $robocopyArgs = @(
+            "`"$Source`"",
+            "`"$Destination`"",
+            "/E",
+            "/R:3",
+            "/W:1",
+            "/B",
+            "/NP",
+            "/NFL",
+            "/NDL"
+        )
+        $robocopyResult = Start-Process -FilePath "robocopy.exe" -ArgumentList $robocopyArgs -NoNewWindow -Wait -PassThru
+        
+        # Robocopy exit codes: 0-7 = OK, 8+ = errors
+        if ($robocopyResult.ExitCode -ge 8) {
+            Write-Warning "Robocopy reported errors (exit code: $($robocopyResult.ExitCode)). Attempting fallback..."
+            Get-ChildItem -Path $Source -Force -Recurse | ForEach-Object {
+                $targetPath = Join-Path -Path $Destination -ChildPath ($_.FullName.Substring($Source.Length))
+                if ($_.PSIsContainer) {
+                    if (!(Test-Path $targetPath)) { New-Item -ItemType Directory -Path $targetPath -Force | Out-Null }
+                } else {
+                    if (!(Test-Path $targetPath)) {
+                        try { Copy-Item -Path $_.FullName -Destination $targetPath -Force -ErrorAction Stop }
+                        catch { Write-Warning "Failed to copy '$($_.FullName)': $($_.Exception.Message)" }
+                    }
                 }
             }
+        } else {
+            Write-Verbose "Robocopy completed successfully (exit code: $($robocopyResult.ExitCode))."
         }
 
-        Write-Verbose "Copy completed."
+        $copiedFiles = Get-ChildItem -Path $Destination -Recurse -Force -File
+        if ($copiedFiles.Count -eq 0) {
+            throw "Copy-Directory failed: No files were copied to '$Destination'."
+        }
+        Write-Verbose "Copy completed. $($copiedFiles.Count) files copied."
 
     } catch {
         Write-Error "Error during copy operation: $($_.Exception.Message)"
@@ -815,13 +831,18 @@ function Get-WalSettingsData {
                     $blobHex = ""
                     $status = ""
 
-                    # Case A: Value is BLOB of 32 bytes (Type 76 / 0x4C)
-                    if ($vType -eq 0x4C) {
-                        if (($dataStart + $kLen + 32) -le $pEnd) {
-                            $blob = New-Object byte[] 32
-                            [Buffer]::BlockCopy($bytes, ($dataStart + $kLen), $blob, 0, 32)
-                            $blobHex = [BitConverter]::ToString($blob).Replace("-","")
-                            $status = "32 bytes"
+                    # Case A: Value is BLOB - SQLite serial type: blobSize = (vType - 12) / 2
+                    # WhatsApp changed from 32-byte keys (0x4C) to 48-byte keys (0x6C)
+                    # Accept any BLOB between 16 and 64 bytes as a valid key candidate
+                    if ($vType -ge 12 -and $vType % 2 -eq 0) {
+                        $blobSize = ($vType - 12) / 2
+                        if ($blobSize -ge 16 -and $blobSize -le 64) {
+                            if (($dataStart + $kLen + $blobSize) -le $pEnd) {
+                                $blob = New-Object byte[] $blobSize
+                                [Buffer]::BlockCopy($bytes, ($dataStart + $kLen), $blob, 0, $blobSize)
+                                $blobHex = [BitConverter]::ToString($blob).Replace("-","")
+                                $status = "$blobSize bytes"
+                            }
                         }
                     }
                     # Caso B: Value é NULL (Tipo 0)
@@ -1017,6 +1038,32 @@ public class ClipcWrapper {
     Set-Variable -Name targetOutput -Value "$OutputPath\ZAPiXDESK_$reverseDate" -Scope Global
     Write-Verbose $WhatsAppPath
     Write-Verbose "Copying $WhatsAppPath to $targetOutput"
+    
+    # Close WhatsApp to release file locks on databases
+    $whatsAppProcesses = Get-Process -Name "*WhatsApp*" -ErrorAction SilentlyContinue
+    $wasWhatsAppRunning = $false
+    if ($whatsAppProcesses) {
+        $wasWhatsAppRunning = $true
+        Write-Output "WhatsApp Desktop is running (PID: $($whatsAppProcesses.Id -join ', ')). Closing to release database file locks..."
+        foreach ($proc in $whatsAppProcesses) {
+            try { $proc.CloseMainWindow() | Out-Null } catch { }
+        }
+        $timeout = 10; $elapsed = 0
+        while ($elapsed -lt $timeout) {
+            Start-Sleep -Seconds 1; $elapsed++
+            $remaining = Get-Process -Name "*WhatsApp*" -ErrorAction SilentlyContinue
+            if (-not $remaining) { Write-Output "WhatsApp closed gracefully."; break }
+        }
+        $remaining = Get-Process -Name "*WhatsApp*" -ErrorAction SilentlyContinue
+        if ($remaining) {
+            Write-Warning "Force-terminating WhatsApp..."
+            $remaining | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+        Start-Sleep -Seconds 2
+        Write-Output "File locks released. Proceeding with copy..."
+    }
+    
     Copy-Directory -Source $WhatsAppPath -Destination $targetOutput
     "ZAPiXDESK DATE: $reverseDate"| Out-File -FilePath "$targetOutput\$metaDataFileName" -Append
     if (-not $PSBoundParameters.ContainsKey('Offline'))
@@ -1048,17 +1095,39 @@ public class ClipcWrapper {
         $sessionDBSecretData = Protect-WebView2Secret $global:webview2_staticBytes
         $sessionDBSecret = $sessionDBSecretData.Secret32 
         Write-Output "(sessionDBSecret): $( [BitConverter]::ToString($sessionDBSecret).Replace('-', ''))"
+        
+        # Verify critical files were copied
+        if (-not (Test-Path "$targetOutput\session.db-wal")) {
+            Write-Error "CRITICAL: session.db-wal not copied. Files may be locked. Run as Administrator."
+            return
+        }
+        
         Write-Output "Decrypting session.db-wal"
-        Decrypt-DBWALFile $sessionDBSecret "$targetOutput\session.db-wal" "$targetOutput\session.dec.db-wal"
+        try { Decrypt-DBWALFile $sessionDBSecret "$targetOutput\session.db-wal" "$targetOutput\session.dec.db-wal" }
+        catch { Write-Error "Failed to decrypt session.db-wal: $($_.Exception.Message)"; return }
         Write-Output "Decrypting session.db"
-        Decrypt-DBFile $sessionDBSecret "$targetOutput\session.db" "$targetOutput\session.dec.db"
+        try { Decrypt-DBFile $sessionDBSecret "$targetOutput\session.db" "$targetOutput\session.dec.db" }
+        catch { Write-Error "Failed to decrypt session.db: $($_.Exception.Message)"; return }
         
         #Decrypt-AllFiles $sessionDBSecret ($targetOutput)
         Write-Output $targetOutput"\session.dec.db-wal"
         $clientKeyList = Get-WalSettingsData $targetOutput"\session.dec.db-wal"
-        $clientKey = Convert-HexStringToByteArray $clientKeyList[-1].HexBlob
+        
+        # Validate clientKeyList
+        if (-not $clientKeyList -or $clientKeyList.Count -eq 0) {
+            Write-Error "CRITICAL: No client keys found in session.dec.db-wal."
+            Write-Error "The WAL file may be empty or in an unexpected format."
+            return
+        }
+        
+        $lastEntry = $clientKeyList[-1]
+        if (-not $lastEntry -or [string]::IsNullOrWhiteSpace($lastEntry.HexBlob) -or $lastEntry.HexBlob -eq '[NULL]') {
+            Write-Error "CRITICAL: Last client key entry has no valid blob data."
+            return
+        }
+        
+        $clientKey = Convert-HexStringToByteArray $lastEntry.HexBlob
         Write-Output "(clientKey): $( [BitConverter]::ToString($clientKey).Replace('-', '') )"
-        #Write-Output $clientKey
         
         #Session dir
         $sha1 = [System.Security.Cryptography.SHA1]::Create()
@@ -1101,10 +1170,21 @@ public class ClipcWrapper {
         Write-Output "(DBKEY): $( [BitConverter]::ToString($dbKey).Replace('-', '') )"
         $workingDir = "$targetOutput\sessions\$targetSession"
         
-        Write-Output "Decrypting nativeSettings.db-wal"
-        Decrypt-DBWALFile $dbKey ("$workingDir\nativeSettings.db-wal") ("$workingDir\nativeSettings.dec.db-wal")
-        Write-Output "Decrypting nativeSettings.db"
-        Decrypt-DBFile $dbKey ("$workingDir\nativeSettings.db") ("$workingDir\nativeSettings.dec.db")
+        # Verify session directory exists
+        if (-not (Test-Path $workingDir)) {
+            Write-Error "CRITICAL: Session directory not found: '$workingDir'"
+            return
+        }
+        
+        if (Test-Path "$workingDir\nativeSettings.db-wal") {
+            Write-Output "Decrypting nativeSettings.db-wal"
+            Decrypt-DBWALFile $dbKey ("$workingDir\nativeSettings.db-wal") ("$workingDir\nativeSettings.dec.db-wal")
+        } else { Write-Warning "nativeSettings.db-wal not found - skipping." }
+        
+        if (Test-Path "$workingDir\nativeSettings.db") {
+            Write-Output "Decrypting nativeSettings.db"
+            Decrypt-DBFile $dbKey ("$workingDir\nativeSettings.db") ("$workingDir\nativeSettings.dec.db")
+        } else { Write-Warning "nativeSettings.db not found - skipping." }
 
         
         $databaseKeyList = Get-WalSettingsData "$workingDir\nativeSettings.dec.db-wal"
@@ -1123,28 +1203,34 @@ public class ClipcWrapper {
                 $dbKey = Convert-HexStringToByteArray $lastFromThisType.HexBlob
                 switch ($currentKey) {
                     1 {
-                        Write-Output "Decrypting genericStorage.db-wal"
-                        Decrypt-DBWALFile $dbKey ("$workingDir\genericStorage.db-wal") ("$workingDir\genericStorage.dec.db-wal")
-                        Write-Output "Decrypting genericStorage.db"
-                        Decrypt-DBFile $dbKey ("$workingDir\genericStorage.db") ("$workingDir\genericStorage.dec.db")
+                        $dbNames = @("genericStorage")
+                        foreach ($dbName in $dbNames) {
+                            if (Test-Path "$workingDir\$dbName.db-wal") {
+                                Write-Output "Decrypting $dbName.db-wal"
+                                try { Decrypt-DBWALFile $dbKey ("$workingDir\$dbName.db-wal") ("$workingDir\$dbName.dec.db-wal") }
+                                catch { Write-Warning "Error decrypting $($dbName).db-wal: $($_.Exception.Message)" }
+                            } else { Write-Warning "$dbName.db-wal not found - skipping." }
+                            if (Test-Path "$workingDir\$dbName.db") {
+                                Write-Output "Decrypting $dbName.db"
+                                try { Decrypt-DBFile $dbKey ("$workingDir\$dbName.db") ("$workingDir\$dbName.dec.db") }
+                                catch { Write-Warning "Error decrypting $($dbName).db: $($_.Exception.Message)" }
+                            } else { Write-Warning "$dbName.db not found - skipping." }
+                        }
                     }
                     2 {
-                        Write-Output "Decrypting abprops.db-wal"
-                        Decrypt-DBWALFile $dbKey ("$workingDir\abprops.db-wal") ("$workingDir\abprops.dec.db-wal")
-                        Write-Output "Decrypting abprops.db"
-                        Decrypt-DBFile $dbKey ("$workingDir\abprops.db") ("$workingDir\abprops.dec.db")
-                        Write-Output "Decrypting contacts.db-wal"
-                        Decrypt-DBWALFile $dbKey ("$workingDir\contacts.db-wal") ("$workingDir\contacts.dec.db-wal")
-                        Write-Output "Decrypting contacts.db"
-                        Decrypt-DBFile $dbKey ("$workingDir\contacts.db") ("$workingDir\contacts.dec.db")
-                        Write-Output "Decrypting contactsState.db-wal"
-                        Decrypt-DBWALFile $dbKey ("$workingDir\contactsState.db-wal") ("$workingDir\contactsState.dec.db-wal")
-                        Write-Output "Decrypting contactsState.db"
-                        Decrypt-DBFile $dbKey ("$workingDir\contactsState.db") ("$workingDir\contactsState.dec.db")
-                        Write-Output "Decrypting mediaDownloads.db-wal"
-                        Decrypt-DBWALFile $dbKey ("$workingDir\mediaDownloads.db-wal") ("$workingDir\mediaDownloads.dec.db-wal")
-                        Write-Output "Decrypting mediaDownloads.db"
-                        Decrypt-DBFile $dbKey ("$workingDir\mediaDownloads.db") ("$workingDir\mediaDownloads.dec.db")
+                        $dbNames = @("abprops","contacts","contactsState","mediaDownloads")
+                        foreach ($dbName in $dbNames) {
+                            if (Test-Path "$workingDir\$dbName.db-wal") {
+                                Write-Output "Decrypting $dbName.db-wal"
+                                try { Decrypt-DBWALFile $dbKey ("$workingDir\$dbName.db-wal") ("$workingDir\$dbName.dec.db-wal") }
+                                catch { Write-Warning "Error decrypting $($dbName).db-wal: $($_.Exception.Message)" }
+                            } else { Write-Warning "$dbName.db-wal not found - skipping." }
+                            if (Test-Path "$workingDir\$dbName.db") {
+                                Write-Output "Decrypting $dbName.db"
+                                try { Decrypt-DBFile $dbKey ("$workingDir\$dbName.db") ("$workingDir\$dbName.dec.db") }
+                                catch { Write-Warning "Error decrypting $($dbName).db: $($_.Exception.Message)" }
+                            } else { Write-Warning "$dbName.db not found - skipping." }
+                        }
                     }
                     3 {
                         #Write-Warning "NOP"
@@ -1189,6 +1275,16 @@ public class ClipcWrapper {
         Write-Verbose "Checksum file (ZIP): $checksumFileZip"
     }
     Write-Output "MD5 Hash: $checksumFileZip (hash also copied to clipboard)"
+    
+    # Restart WhatsApp if it was running before
+    if ($wasWhatsAppRunning) {
+        Write-Output "Restarting WhatsApp Desktop..."
+        try {
+            Start-Process "shell:AppsFolder\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App" -ErrorAction SilentlyContinue
+            Write-Output "WhatsApp Desktop restarted."
+        } catch { Write-Warning "Could not restart WhatsApp. Start it manually." }
+    }
+    
     [Windows.Forms.MessageBox]::Show("WhatsApp acquisition and decryption completed. Results save in $zipTarget", "Acquisition Complete","Ok","Information") | Out-Null
 }
 
