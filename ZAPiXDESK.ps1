@@ -12,8 +12,8 @@ param (
 )
 
 # Windows WhatsApp Desktop
-# Version: 2.1
-# Revised Date: 20/01/26
+# Version: 2.2
+# Revised Date: 23/06/26
 # Revised by: Alberto Magno (kraftdenker)
 
 
@@ -31,6 +31,10 @@ param (
 
 
 # Updates: 
+# 26 June 2026 - Alberto Magno @kraftdenker
+# Change Settings and NativeSetting carving process to recover keys from WAL files.
+
+
 # 20 January 2026 - Alberto Magno @kraftdenker
 # After M3t4 changes in 09/12/25, it has been added new strategie to address the new WEBVIEW2 architecture using reverse-fu techniques.
 # Recover of clientKey from session database to derive other database (nativeSettings) witch cares other encryptions keys to decode the 
@@ -73,7 +77,7 @@ param (
 
 $global:metaDataFileName = "ZAPiXDESK.mtd.txt"
 $global:whatsappDll_passphrase = "5303b14c0984e9b13fe75770cd25aaf7"
-$global:ZDVersion = "2.1.0"
+$global:ZDVersion = "2.2.0"
 $global:webview2_staticBytes = "23a7f19c11e5bd784235c96f85d24913"
 $global:getOUID_salt = "0x6300760031006700310067007600"
 $global:pbkdf_iterations = 10000
@@ -83,18 +87,18 @@ function Convert-HexStringToByteArray {
         [string]$hexString
     )
 
-    # Remove espaços extras no início e fim
+    # Trim extra whitespace at the start and end
     $hexString = $hexString.Trim()
 
-    # Remove qualquer caractere que não seja válido em hexadecimal (0-9, A-F, a-f)
+    # Remove any character that is not valid hexadecimal (0-9, A-F, a-f)
     $hexString = $hexString -replace '[^0-9A-Fa-f]', ''
 
-    # Verifica se o comprimento é par
+    # Verify the length is even
     if ($hexString.Length % 2 -ne 0) {
         throw "The hex string must have an even length. Actual length: $($hexString.Length)"
     }
 
-    # Converte a string em array de bytes
+    # Convert the string into a byte array
     $byteArray = @()
     for ($i = 0; $i -lt $hexString.Length; $i += 2) {
         $byteValue = [Convert]::ToByte($hexString.Substring($i, 2), 16)
@@ -798,6 +802,7 @@ function Get-WalSettingsData {
         return $null
     }
 
+    # Size of the page starting from WAL header
     $pageSize = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 8))
     $offset = 32
     $results = New-Object System.Collections.Generic.List[PSObject]
@@ -806,68 +811,196 @@ function Get-WalSettingsData {
         $pStart = $offset + 24
         $pEnd = $pStart + $pageSize
         
-        # scan byte per byte
-        for ($cursor = $pStart; $cursor -lt ($pEnd - 3); $cursor++) {
+        # Scan page bytes
+        for ($cursor = $pStart; $cursor -lt ($pEnd - 15); $cursor++) {
             
-            # Header Size 3  (Key, Value)
-            if ($bytes[$cursor] -eq 0x03) {
-                $kType = $bytes[$cursor+1]
-                $vType = $bytes[$cursor+2]
+            # Search Record Header Size (in case, 0x05)
+            # To address small varints 
+            $recHeaderSize = $bytes[$cursor]
+            
+            if ($recHeaderSize -ge 5 -and $recHeaderSize -le 9) {
                 
-                $kVal = $null
-                $kLen = 0
-                $dataStart = $cursor + 3
+                # mapping collumns:
+                # [cursor]   -> Record Header Size (ex: 0x05)
+                # [cursor+1] -> Serial Type Col 1 (accountId / almost allways 0x00)
+                # [cursor+2] -> Serial Type Col 2 (clientKey / ex: 0x6C to 48 bytes)
+                # [cursor+3] -> Serial Type Col 3 (serverEncKeySalt / ex: 0x00 or type BLOB)
+                # [cursor+4] -> Serial Type Col 4 (lastActiveTimestamp / ex: 0x04 or type INT)
+                
+                $tAccountId = $bytes[$cursor + 1]
+                $tClientKey = $bytes[$cursor + 2]
+                $tSalt      = $bytes[$cursor + 3]
+                $tTimestamp = $bytes[$cursor + 4]
 
-                # Identify Key
-                if ($kType -eq 8) { $kVal = 0; $kLen = 0 }
-                elseif ($kType -eq 9) { $kVal = 1; $kLen = 0 }
-                elseif ($kType -eq 1) { 
-                    $kVal = [int][sbyte]$bytes[$dataStart]
-                    $kLen = 1 
-                }
+                # Strict filter: the clientKey column MUST be a BLOB (type >= 12 and even)
+                # The timestamp column must be a valid integer type (1 through 6)
+                if ($tClientKey -ge 12 -and ($tClientKey % 2 -eq 0) -and 
+                    ($tTimestamp -ge 1 -and $tTimestamp -le 6) -and
+                    ($tAccountId -eq 0 -or $tAccountId -le 6)) {
+                    
+                    # Calculate the BLOB key size
+                    $blobSize = ($tClientKey - 12) / 2
 
-                # Filter keys (0 to 10)
-                if ($null -ne $kVal -and ($kVal -ge 0 -and $kVal -le 10)) {
-                    $blobHex = ""
-                    $status = ""
+                    # Validate keys between 16 and 64 bytes (this one is 48 bytes)
+                    if ($blobSize -ge 16 -and $blobSize -le 64) {
+                        
+                        # The data payload starts immediately after the Record Header
+                        # However, if the first column (accountId) has a physical value stored (type 1 to 6),
+                        # we need to skip that integer size to reach the clientKey.
+                        $col1Size = 0
+                        if ($tAccountId -ge 1 -and $tAccountId -le 4) { $col1Size = $tAccountId }
+                        elseif ($tAccountId -eq 5) { $col1Size = 6 }
+                        elseif ($tAccountId -eq 6) { $col1Size = 8 }
+                        
+                        $dataStart = $cursor + $recHeaderSize + $col1Size
+                        
+                        if (($dataStart + $blobSize) -le $pEnd) {
+                            $blob = New-Object byte[] $blobSize
+                            [Buffer]::BlockCopy($bytes, $dataStart, $blob, 0, $blobSize)
+                            
+                            $blobHex = [BitConverter]::ToString($blob).Replace("-","")
+                            
+                            $saltStatus = if ($tSalt -eq 0) { "Null" } else { "$(([int]$tSalt - 12) / 2) bytes" }
+                            $frameIdx = [Math]::Floor(($offset - 32) / ($pageSize + 24))
+                            $dbPage = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, $offset))
 
-                    # Case A: Value is BLOB - SQLite serial type: blobSize = (vType - 12) / 2
-                    # WhatsApp changed from 32-byte keys (0x4C) to 48-byte keys (0x6C)
-                    # Accept any BLOB between 16 and 64 bytes as a valid key candidate
-                    if ($vType -ge 12 -and $vType % 2 -eq 0) {
-                        $blobSize = ($vType - 12) / 2
-                        if ($blobSize -ge 16 -and $blobSize -le 64) {
-                            if (($dataStart + $kLen + $blobSize) -le $pEnd) {
-                                $blob = New-Object byte[] $blobSize
-                                [Buffer]::BlockCopy($bytes, ($dataStart + $kLen), $blob, 0, $blobSize)
-                                $blobHex = [BitConverter]::ToString($blob).Replace("-","")
-                                $status = "$blobSize bytes"
-                            }
+                            $results.Add([PSCustomObject]@{
+                                Frame            = "F$frameIdx"
+                                DBPage           = $dbPage
+                                ClientKeySize    = "$blobSize bytes"
+                                ClientKeyHex     = $blobHex
+                                ServerSaltStatus = $saltStatus
+                            })
+                            
+                            # Advance the cursor to the end of the extracted record to avoid duplicates
+                            $cursor += $recHeaderSize + $col1Size + $blobSize - 1
                         }
-                    }
-                    # Caso B: Value é NULL (Tipo 0)
-                    elseif ($vType -eq 0) {
-                        $blobHex = "[NULL]"
-                        $status = "Null"
-                    }
-
-                    if ($status -ne "") {
-                        $results.Add([PSCustomObject]@{
-                            Frame    = "F" + [Math]::Floor(($offset-32)/($pageSize+24))
-                            Key      = $kVal
-                            Status   = $status
-                            HexBlob  = $blobHex
-                            DBPage   = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, $offset))
-                        })
                     }
                 }
             }
         }
         $offset += 24 + $pageSize
     }
-
+	#Write-Output $results[-1].ClientKeyHex
     return $results
 }
+
+function Get-WalNativeSettingsData {
+    param (
+        [string]$FilePath
+    )
+
+    if (-not (Test-Path $FilePath)) { 
+        Write-Error "File not found: $FilePath"
+        return $null 
+    }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+    } catch {
+        Write-Error "Error reading file: $($_.Exception.Message)"
+        return $null
+    }
+
+    # Page size from the WAL header
+    $pageSize = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 8))
+    $offset = 32
+    $results = New-Object System.Collections.Generic.List[PSObject]
+
+    while ($offset + 24 + $pageSize -le $bytes.Length) {
+        $pStart = $offset + 24
+        $pEnd = $pStart + $pageSize
+        
+        # Scan the page byte by byte
+        for ($cursor = $pStart; $cursor -lt ($pEnd - 10); $cursor++) {
+            
+            # Typical Record Header Size for 2 columns is 0x03
+            $recHeaderSize = $bytes[$cursor]
+            
+            if ($recHeaderSize -eq 3) {
+                
+                # Column mapping:
+                # [cursor]   -> Record Header Size (0x03)
+                # [cursor+1] -> Serial Type Col 1 (key - Integer: 1 to 6, or 8, 9)
+                # [cursor+2] -> Serial Type Col 2 (value - BLOB: even >= 12, or NULL: 0)
+                
+                $tKey   = $bytes[$cursor + 1]
+                $tValue = $bytes[$cursor + 2]
+
+                # Validation: tKey must be a SQLite integer type and tValue must be BLOB or NULL
+                $isValidKey = ($tKey -ge 1 -and $tKey -le 6) -or ($tKey -eq 8) -or ($tKey -eq 9)
+                $isValidValue = ($tValue -eq 0) -or ($tValue -ge 12 -and ($tValue % 2 -eq 0))
+
+                if ($isValidKey -and $isValidValue) {
+                    
+                    # 1. Determine the size and extract the numeric value of 'key'
+                    $keyLen = 0
+                    $keyValue = 0
+
+                    if ($tKey -eq 8) { $keyValue = 0 }
+                    elseif ($tKey -eq 9) { $keyValue = 1 }
+                    else {
+                        # Mapping of SQLite integer sizes
+                        if ($tKey -eq 1) { $keyLen = 1 }
+                        elseif ($tKey -eq 2) { $keyLen = 2 }
+                        elseif ($tKey -eq 3) { $keyLen = 3 }
+                        elseif ($tKey -eq 4) { $keyLen = 4 }
+                        elseif ($tKey -eq 5) { $keyLen = 6 }
+                        elseif ($tKey -eq 6) { $keyLen = 8 }
+
+                        $kStart = $cursor + $recHeaderSize
+                        if (($kStart + $keyLen) -le $pEnd) {
+                            if ($keyLen -eq 1) { $keyValue = [int][sbyte]$bytes[$kStart] }
+                            elseif ($keyLen -eq 2) { $keyValue = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt16($bytes, $kStart)) }
+                            elseif ($keyLen -eq 4) { $keyValue = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, $kStart)) }
+                            else {
+                                # Generic hex fallback for an uncommon int size (3, 6, or 8 bytes)
+                                $kBytes = New-Object byte[] $keyLen
+                                [Buffer]::BlockCopy($bytes, $kStart, $kBytes, 0, $keyLen)
+                                $keyValue = "0x" + [BitConverter]::ToString($kBytes).Replace("-","")
+                            }
+                        }
+                    }
+
+                    # 2. Determine the size and extract the BLOB 'value'
+                    $blobSize = 0
+                    $blobHex = "[NULL]"
+                    
+                    if ($tValue -ge 12) {
+                        $blobSize = ($tValue - 12) / 2
+                        $vStart = $cursor + $recHeaderSize + $keyLen
+
+                        if (($vStart + $blobSize) -le $pEnd -and $blobSize -gt 0) {
+                            $vBytes = New-Object byte[] $blobSize
+                            [Buffer]::BlockCopy($bytes, $vStart, $vBytes, 0, $blobSize)
+                            $blobHex = [BitConverter]::ToString($vBytes).Replace("-","")
+                        }
+                    }
+
+                    # Add to results if a consistent structure is found
+                    $frameIdx = [Math]::Floor(($offset - 32) / ($pageSize + 24))
+                    $dbPage = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, $offset))
+
+                    $results.Add([PSCustomObject]@{
+                        Frame     = "F$frameIdx"
+                        DBPage    = $dbPage
+                        Key       = $keyValue
+                        ValueSize = if ($tValue -eq 0) { "Null" } else { "$blobSize bytes" }
+                        ValueHex  = $blobHex
+                    })
+
+                    # Advance the cursor to the end of the processed record
+                    $cursor += $recHeaderSize + $keyLen + $blobSize - 1
+                }
+            }
+        }
+        $offset += 24 + $pageSize
+    }
+    #Write-Output $results 
+    return $results
+}
+
+
 
 function Protect-WebView2Secret {
     param (
@@ -878,7 +1011,7 @@ function Protect-WebView2Secret {
         [string]$Descriptor = "LOCAL=user"
     )
 
-    # 1. Definir e Adicionar o tipo C# (apenas se não existir)
+    # 1. Define and add the C# type (only if it does not already exist)
     if (-not ([System.Management.Automation.PSTypeName]'DpapiNgInteropV2').Type) {
         $code = @"
         using System;
@@ -1121,12 +1254,12 @@ public class ClipcWrapper {
         }
         
         $lastEntry = $clientKeyList[-1]
-        if (-not $lastEntry -or [string]::IsNullOrWhiteSpace($lastEntry.HexBlob) -or $lastEntry.HexBlob -eq '[NULL]') {
+        if (-not $lastEntry -or [string]::IsNullOrWhiteSpace($lastEntry.ClientKeyHex) -or $lastEntry.ClientKeyHex -eq '[NULL]') {
             Write-Error "CRITICAL: Last client key entry has no valid blob data."
             return
         }
         
-        $clientKey = Convert-HexStringToByteArray $lastEntry.HexBlob
+        $clientKey = Convert-HexStringToByteArray $lastEntry.ClientKeyHex
         Write-Output "(clientKey): $( [BitConverter]::ToString($clientKey).Replace('-', '') )"
         
         #Session dir
@@ -1187,12 +1320,12 @@ public class ClipcWrapper {
         } else { Write-Warning "nativeSettings.db not found - skipping." }
 
         
-        $databaseKeyList = Get-WalSettingsData "$workingDir\nativeSettings.dec.db-wal"
-        #Write-Verbose $databaseKeyList
+        $databaseKeyList = Get-WalNativeSettingsData "$workingDir\nativeSettings.dec.db-wal"
+        #Write-Output $databaseKeyList
         
 
         if ($databaseKeyList) {
-            # 2. grup Keys filter keys types 1, 2 e 3
+            # 2. Group keys and filter key types 1, 2, and 3
             $keyGroup = $databaseKeyList | Where-Object { $_.Key -in 1, 2, 3 } | Group-Object Key
 
             foreach ($keyType in $keyGroup) {
@@ -1200,7 +1333,7 @@ public class ClipcWrapper {
                 $lastFromThisType = $keyType.Group | Select-Object -Last 1
                 
                 $currentKey = $lastFromThisType.Key
-                $dbKey = Convert-HexStringToByteArray $lastFromThisType.HexBlob
+                $dbKey = Convert-HexStringToByteArray $lastFromThisType.ValueHex
                 switch ($currentKey) {
                     1 {
                         $dbNames = @("genericStorage")
