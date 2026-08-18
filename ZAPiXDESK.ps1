@@ -659,37 +659,38 @@ function Get-SHA512Checksum {
 }
 
 function Get-MD5Checksum {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$FilePath
     )
 
     try {
-        # Check if the file exists
         if (!(Test-Path -Path $FilePath -PathType Leaf)) {
             throw "File '$FilePath' not found."
         }
 
-        # Calculate the MD5
         $hash = Get-FileHash -Path $FilePath -Algorithm MD5
-        # Create the output file path. Replace ".zip" with ".md5.txt" only if it ends with ".zip".
-        # If the file doesn't end with ".zip", simply append ".md5.txt".
+
         if ($FilePath -like "*.zip") {
             $outputFilePath = $FilePath -replace "\.zip$", ".md5.txt"
         } else {
             $outputFilePath = $FilePath + ".md5.txt"
         }
-        # Write the hash to the output file using UTF8 encoding
+
+        # Salva o arquivo de hash
         "$($hash.Hash) - $FilePath" | Out-File -FilePath $outputFilePath -Encoding UTF8
 
-        # Copy the hash to the clipboard
-        Set-Clipboard -Value $hash.Hash
-        Write-Verbose "MD5 checksum for '$FilePath' written to '$outputFilePath' and copied to clipboard."
-        return $outputFilePath # Return the checksum file path
+        # Força o envio direto do valor da propriedade Hash para a área de transferência
+        # Set-Clipboard -Value "$($hash.Hash)"
+
+        # Write-Verbose "MD5 checksum for '$FilePath' written to '$outputFilePath' and copied to clipboard."
+        
+        return $outputFilePath
     }
     catch {
         Write-Error "Error generating MD5 checksum for '$FilePath': $($_.Exception.Message)"
-        return $null # Return $null in case of error
+        return $null
     }
 }
 
@@ -1351,7 +1352,7 @@ public class ClipcWrapper {
                         }
                     }
                     2 {
-                        $dbNames = @("abprops","contacts","contactsState","mediaDownloads")
+                        $dbNames = @("abprops","contacts","contactsState","mediaDownloads", "metaconfig")
                         foreach ($dbName in $dbNames) {
                             if (Test-Path "$workingDir\$dbName.db-wal") {
                                 Write-Output "Decrypting $dbName.db-wal"
@@ -1403,6 +1404,8 @@ public class ClipcWrapper {
     Compress-Directory -Source $targetOutput -DestinationZipFile $zipTarget
     Write-Output "Compressed file (ZIP) generated: $zipTarget"
     # Generate integrity HASH - Changed to MD5 as computation time for higher algorithms for large files can be minutes instead of seconds.
+    Start-Sleep -Seconds 15
+
     $checksumFileZip = Get-MD5Checksum -FilePath $zipTarget
     if ($checksumFileZip) {
         Write-Verbose "Checksum file (ZIP): $checksumFileZip"
