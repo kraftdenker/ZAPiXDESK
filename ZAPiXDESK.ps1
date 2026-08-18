@@ -12,7 +12,7 @@ param (
 )
 
 # Windows WhatsApp Desktop
-# Version: 2.2
+# Version: 2.2.1
 # Revised Date: 23/06/26
 # Revised by: Alberto Magno (kraftdenker)
 
@@ -77,7 +77,7 @@ param (
 
 $global:metaDataFileName = "ZAPiXDESK.mtd.txt"
 $global:whatsappDll_passphrase = "5303b14c0984e9b13fe75770cd25aaf7"
-$global:ZDVersion = "2.2.0"
+$global:ZDVersion = "2.2.1"
 $global:webview2_staticBytes = "23a7f19c11e5bd784235c96f85d24913"
 $global:getOUID_salt = "0x6300760031006700310067007600"
 $global:pbkdf_iterations = 10000
