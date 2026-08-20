@@ -501,24 +501,83 @@ function Decrypt-DBFile ($dbKey, $inputFile, $outputFile) {
     Write-Verbose "DB file successfully decrypted and input file deleted: $outputFile"
 }
 
+function Get-BEUInt32 ($bytes, $offset) {
+    # Bit-shift instead of range-slicing ($bytes[($offset+3)..$offset]) -
+    # slicing allocates a new temporary array on every call, which adds up
+    # fast when this runs hundreds of thousands of times.
+    return ([uint32]$bytes[$offset] -shl 24) -bor ([uint32]$bytes[$offset+1] -shl 16) -bor ([uint32]$bytes[$offset+2] -shl 8) -bor [uint32]$bytes[$offset+3]
+}
+
+function Get-BEBytes ($value) {
+    $b = [System.BitConverter]::GetBytes([uint32]$value)
+    [Array]::Reverse($b)
+    return $b
+}
+
+function Add-ZDWalChecksumType {
+    # SQLite's WAL checksum (walChecksumBytes) isn't in BouncyCastle - it's
+    # SQLite's own simple two-accumulator algorithm, not a standard crypto
+    # primitive. Running its per-8-byte-word loop as interpreted PowerShell
+    # was the actual cost center (hundreds of thousands of interpreted
+    # iterations for a few MB of WAL data). Compiling it via Add-Type - the
+    # same technique this script already uses for DpapiNgInteropV2/
+    # ClipcWrapper - lets the JIT turn it into ordinary machine code, same
+    # as the BouncyCastle AES calls already are.
+    if (-not ([System.Management.Automation.PSTypeName]'ZDWalChecksum').Type) {
+        $code = @"
+        using System;
+
+        public static class ZDWalChecksum {
+            public static uint[] Update(byte[] data, int offset, int length, uint s0, uint s1, bool bigEndian) {
+                int end = offset + length;
+                for (int i = offset; i < end; i += 8) {
+                    uint x0, x1;
+                    if (bigEndian) {
+                        x0 = (uint)((data[i] << 24) | (data[i+1] << 16) | (data[i+2] << 8) | data[i+3]);
+                        x1 = (uint)((data[i+4] << 24) | (data[i+5] << 16) | (data[i+6] << 8) | data[i+7]);
+                    } else {
+                        x0 = BitConverter.ToUInt32(data, i);
+                        x1 = BitConverter.ToUInt32(data, i + 4);
+                    }
+                    unchecked {
+                        s0 = s0 + x0 + s1;
+                        s1 = s1 + x1 + s0;
+                    }
+                }
+                return new uint[] { s0, s1 };
+            }
+        }
+"@
+        Add-Type -TypeDefinition $code
+    }
+}
+
 function Decrypt-DBWALFile ($dbKey, $inputFile, $outputFile) {
-    $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new() 
-    $blockCipher = [Org.BouncyCastle.Crypto.Modes.OfbBlockCipher]::new($cipher, 128) 
+    Add-ZDWalChecksumType
+    $cipher = [Org.BouncyCastle.Crypto.Engines.AesEngine]::new()
+    $blockCipher = [Org.BouncyCastle.Crypto.Modes.OfbBlockCipher]::new($cipher, 128)
     $keyParameter = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($dbKey)
     $pageSize = 4096
     $headerSize = 32
     $pageHeaderSize = 24
     $inputBytes = [System.IO.File]::ReadAllBytes($inputFile)
-    
+
     $fileHeader = [byte[]]::new($headerSize)
     [Array]::Copy($inputBytes,0,$fileHeader,0,$headerSize)
-    
+
+    # WAL checksum byte order is selected by the magic number (offset 0-3):
+    # 0x377f0682 = native/little-endian checksums, 0x377f0683 = big-endian.
+    $magic = Get-BEUInt32 $fileHeader 0
+    $bigEndian = ($magic -eq 0x377f0683)
+    $runS0 = Get-BEUInt32 $fileHeader 24
+    $runS1 = Get-BEUInt32 $fileHeader 28
+
     # Create a file stream to write the output bytes
     $fileStream = [System.IO.File]::OpenWrite($outputFile)
-    
+
     # Write the file header to the output file
     $fileStream.Write($fileHeader, 0, $fileHeader.Length)
-    
+
     for ($i = $headerSize; $i -lt $inputBytes.Length; $i += $pageSize+$pageHeaderSize) {
         $pageHeaderData = $inputBytes[$i..($i + $pageHeaderSize - 1)]
         $pageData = $inputBytes[($i+$pageHeaderSize)..($i + $pageHeaderSize+ $pageSize - 1)]
@@ -527,18 +586,41 @@ function Decrypt-DBWALFile ($dbKey, $inputFile, $outputFile) {
         [Array]::Reverse($pageIndex)
         $pageIndex = [System.BitConverter]::ToInt32($pageIndex, 0)
         Write-Verbose "pageIndex: $pageIndex"
-        
+
         $IV = [byte[]]::new(16)
         [BitConverter]::GetBytes([int]$pageIndex).CopyTo($IV, 0)
         $pageData[-12..-1].CopyTo($IV, 4)
         $ivHex = [BitConverter]::ToString($IV).Replace("-", "")
         Write-Verbose "IV: $ivHex"
-        
+
         $decryptedPage = Decrypt-Page $blockCipher $keyParameter $pageIndex $pageData
+
+        # Page 1 stores 8 header bytes (offset 0x10-0x17: page size, format
+        # versions, reserved space, payload fractions) in plaintext even in
+        # the "encrypted" file - mirror the swap-back that Decrypt-DBFile
+        # already does for the main .db file, otherwise these bytes get
+        # corrupted by decrypting already-plaintext data.
+        if ($pageIndex -eq 1) {
+            [Array]::Copy($pageData, 0x10, $decryptedPage, 0x10, 8)
+        }
+
+        # ZAPiXDESK never recomputed the WAL frame checksum after changing
+        # the page bytes via decryption, so SQLite rejected every frame it
+        # touched (silently falling back to whatever was already checkpointed
+        # into the base .db file, or - for near-empty base files - seeing an
+        # apparently empty database). Recompute it here so the resulting WAL
+        # is internally consistent and SQLite will recover it normally.
+        $runS0, $runS1 = [ZDWalChecksum]::Update($pageHeaderData, 0, 8, $runS0, $runS1, $bigEndian)
+        $runS0, $runS1 = [ZDWalChecksum]::Update($decryptedPage, 0, $decryptedPage.Length, $runS0, $runS1, $bigEndian)
+        $newChecksum = [byte[]]::new(8)
+        [Array]::Copy((Get-BEBytes $runS0), 0, $newChecksum, 0, 4)
+        [Array]::Copy((Get-BEBytes $runS1), 0, $newChecksum, 4, 4)
+        [Array]::Copy($newChecksum, 0, $pageHeaderData, 16, 8)
+
         $fileStream.Write($pageHeaderData, 0, $pageHeaderData.Length)
         $fileStream.Write($decryptedPage, 0, $decryptedPage.Length)
     }
-    
+
     # Close the file stream
     $fileStream.Close()
     
@@ -1270,7 +1352,13 @@ public class ClipcWrapper {
         Write-Output "(SessionDirectory Name): $targetSession"
         
         #DB files
-        $publisherKey = $ODUID.ID 
+        # NOTE: $ODUID is only populated in the online branch above; in
+        # -Offline mode it is never assigned, so $ODUID.ID silently
+        # evaluates to $null here and every downstream key derivation
+        # (nativeSettings.dec.db and everything chained from it) becomes
+        # garbage with no error raised. $whatsAppAppUID is set correctly in
+        # BOTH branches (from $ODUID.ID online, from -ID offline) - use that.
+        $publisherKey = $whatsAppAppUID
         Write-Output "(publisherKey): $( [BitConverter]::ToString($publisherKey).Replace('-', '') )"
         
         # Generate encryption key (auxKey2) throught PBKDF2
