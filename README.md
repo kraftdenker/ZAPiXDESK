@@ -119,6 +119,8 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--auto-open-devtools-for-tabs
 C:\"Program Files"\WindowsApps\5319275A.WhatsAppDesktop_2.2587.9.0_x64__cv1g1gvanyjgm\WhatsApp.Root.exe --auto-open-devtools-for-tabs
 ```
 
+If you want to view the extracted chats, there is a viewer available at:
+<https://github.com/kraftdenker/ZAPiXDESK_VIEWER/>
 
 Have a nice 4N6!
 
